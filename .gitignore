@@ -1,0 +1,36 @@
+# Training outputs
+runs/
+.cache/
+*.log
+
+# Model weights (large; keep in S3 or a model registry)
+models/*.onnx
+models/*.pth
+models/*.pt
+*.ckpt
+
+# Datasets
+MeGlass_120x120/
+MeGlass_112x112/
+aligned_*/
+data/**/*.jpg
+data/**/*.png
+
+# Generated split/pair files are worth committing -- they define your
+# evaluation protocol and must not silently change between runs.
+!data/splits/*.txt
+!data/pairs/*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

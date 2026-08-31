@@ -1,0 +1,33 @@
+# ESSI-FRS requirements
+#
+# PyTorch is NOT listed here because it must come from the CUDA-specific index.
+# Install it first, separately:
+#
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+#
+# (cu126 wheels are verified to exist for Python 3.13 / win_amd64. On AWS Linux
+#  with newer drivers, cu126 or cu128 both work.)
+#
+# Then:  pip install -r requirements.txt
+
+# --- core ---
+numpy>=1.26
+PyYAML>=6.0
+tqdm>=4.66
+Pillow>=10.0
+
+# --- monitoring & reporting ---
+tensorboard>=2.16
+matplotlib>=3.8
+scikit-learn>=1.4
+
+# --- image ops / alignment ---
+opencv-python-headless>=4.9
+onnxruntime>=1.17          # SCRFD face detector (swap for onnxruntime-gpu on AWS)
+
+# --- export (optional; only needed by scripts/export.py --format onnx) ---
+onnx>=1.16
+onnxscript>=0.1          # required by torch>=2.9's ONNX exporter
+
+# --- testing ---
+pytest>=8.0

@@ -1,0 +1,123 @@
+# ESSI-FRS base configuration.
+#
+# Every other config inherits from this via `_base_: base.yaml` and overrides
+# only what differs. Values here are safe defaults, not a runnable experiment --
+# leaf configs must at minimum set experiment.name and data.adapter.root.
+
+experiment:
+  name: unnamed
+  output_dir: runs/${experiment.name}
+  seed: 3407
+  # cudnn.benchmark picks the fastest conv algorithm per input shape (~15% here,
+  # since our shape never varies). Turn deterministic on only to chase a bug.
+  deterministic: false
+
+data:
+  adapter:
+    type: flat_regex
+    root: null                    # MUST be set by the leaf config
+  input_size: [112, 112]
+  # How to bring source images to input_size. See frs/data/transforms.py --
+  # center_crop_112 preserves eye positions relative to the ArcFace template,
+  # resize_112 shrinks the face slightly.
+  resize_policy: center_crop_112
+  mean: [0.5, 0.5, 0.5]
+  std: [0.5, 0.5, 0.5]
+
+  augment:
+    horizontal_flip: 0.5          # the single most valuable face augmentation
+    color_jitter:
+      brightness: 0.2
+      contrast: 0.2
+      saturation: 0.2
+      hue: 0.0
+      p: 0.2
+    grayscale: 0.05
+    random_erasing:
+      p: 0.2
+      scale: [0.02, 0.15]
+    # NOT enabled: random_resized_crop / rotation. Both break the canonical
+    # alignment the whole pipeline depends on.
+
+  sampler:
+    type: random                  # random | balanced_identity | sqrt_frequency
+
+  batch_size: 64
+  num_workers: 4
+  persistent_workers: true
+  pin_memory: true
+  prefetch_factor: 4
+  drop_last: true
+  scan_cache: .cache/scan
+
+model:
+  backbone:
+    arch: ir_50                   # ir_50 | ir_100 | ir_se_50 | ir_se_100 ...
+    embedding_size: 512
+    pretrained: null              # path to a checkpoint to warm-start from
+    freeze_backbone: false
+    channels_last: true           # ~10-15% on Ampere with AMP
+    gradient_checkpointing: false # trades ~30% speed for ~4x batch size
+  head:
+    type: adaface                 # arcface | cosface | adaface
+    scale: 64.0
+    m: 0.4                        # adaface default; arcface uses 0.5, cosface 0.35
+    h: 0.333                      # adaface only
+    t_alpha: 0.01                 # adaface only: EMA momentum for norm stats
+    partial_fc:
+      enabled: auto               # auto -> on above 300k classes
+      sample_rate: 0.1
+
+loss:
+  label_smoothing: 0.0
+
+optim:
+  type: sgd                       # sgd beats adamw on margin-softmax face rec
+  lr: 0.05
+  momentum: 0.9
+  weight_decay: 5.0e-4
+  nesterov: false
+  # Excludes BatchNorm/bias/PReLU (ndim <= 1) from decay. Worth ~0.5-1%.
+  no_wd_on_bn_and_bias: true
+  head_lr_multiplier: 1.0
+  clip_grad_norm: 5.0
+
+scheduler:
+  type: polylr                    # polylr | cosine | step | multistep | constant
+  warmup_epochs: 1                # mandatory: prevents early-ArcFace divergence
+  warmup_start_factor: 0.1
+  power: 2.0
+  min_lr: 0.0
+
+train:
+  epochs: 24
+  amp: true
+  amp_dtype: float16              # float16 + GradScaler, or bfloat16
+  grad_accum_steps: 1
+  log_every_n_steps: 20
+  save_every_n_epochs: 1
+  save_every_n_steps: 0           # >0 for mid-epoch saves (spot instances)
+  eval_every_n_epochs: 1
+  keep_last_n_checkpoints: 3
+  resume: auto                    # auto | null | path/to/last.pt
+  torch_compile: false            # auto-disabled on Windows regardless
+
+eval:
+  targets: []
+  batch_size: 128
+  flip_test: true                 # average embedding of image + its mirror
+  metric: cosine
+  primary: null                   # which target's accuracy drives best.pt
+
+monitor:
+  tensorboard: true
+  log_grad_norm: true
+  log_feature_norm: true
+  log_gpu_memory: true
+  log_throughput: true
+  histogram_every_n_steps: 500
+
+report:
+  enabled: true
+  formats: [html, md]
+  output: ${experiment.output_dir}/report

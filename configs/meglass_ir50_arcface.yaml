@@ -1,0 +1,82 @@
+# LOCAL A/B run: identical to meglass_ir50_adaface but with the ArcFace head.
+#
+# Use this to compare losses on identical data. ArcFace (m=0.5) is the
+# established baseline; AdaFace should edge it out on MeGlass because the
+# dataset has real quality variation (glasses vs no glasses).
+#
+# Sized for 4 GB VRAM. Expect ~4.5 min/epoch, ~1.8 h for 24 epochs.
+#
+# Before the first run:
+#   python -m scripts.build_meglass_pairs
+# which writes data/splits/meglass_val_identities.txt (300 held-out identities)
+# and data/pairs/meglass_val_pairs.txt. Training excludes those identities, so
+# the reported accuracy is verification on unseen people, not memorisation.
+
+_base_: base.yaml
+
+experiment:
+  name: meglass_ir50_arcface
+  seed: 3407
+
+data:
+  adapter:
+    type: flat_regex
+    root: MeGlass_120x120
+    # Identity = everything before the LAST '@'. The Flickr user id itself
+    # contains an '@' (7276470@N03), so splitting on the first one is wrong.
+    pattern: '^(?P<identity>.+)@[^@]+$'
+    extensions: [".jpg"]
+    min_images_per_identity: 2
+    exclude_identities_file: data/splits/meglass_val_identities.txt
+
+  # Source is 120x120 pre-cropped. Cropping 4px preserves face scale and eye
+  # position exactly; resizing would shrink the face 6.7% off the template.
+  resize_policy: center_crop_112
+
+  batch_size: 64          # fits 4 GB with fragmentation headroom under AMP
+  num_workers: 4          # Windows spawn: >4 costs more in startup than it saves
+  persistent_workers: true
+
+model:
+  backbone:
+    arch: ir_50
+    channels_last: true
+  head:
+    type: arcface
+    scale: 64.0
+    m: 0.5
+    easy_margin: false
+
+optim:
+  type: sgd
+  lr: 0.05                # linear rule gives 0.025 @ effective batch 128;
+                          # raised since 1,710 classes is far easier than 90k
+  momentum: 0.9
+  weight_decay: 5.0e-4
+  no_wd_on_bn_and_bias: true
+  clip_grad_norm: 5.0
+
+scheduler:
+  type: polylr
+  warmup_epochs: 1
+  warmup_start_factor: 0.1
+  power: 2.0
+
+train:
+  epochs: 24              # <16 undertrains the margin; >30 overfits 48k images
+  amp: true
+  amp_dtype: float16
+  grad_accum_steps: 2     # effective batch 128 -- margins get noisy below that
+  log_every_n_steps: 20
+  eval_every_n_epochs: 1
+  resume: auto
+
+eval:
+  targets:
+    - name: meglass_val
+      type: pairs
+      pair_file: data/pairs/meglass_val_pairs.txt
+      n_folds: 10
+  batch_size: 128
+  flip_test: true
+  primary: meglass_val
