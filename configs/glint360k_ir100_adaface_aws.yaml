@@ -1,0 +1,104 @@
+# Full-scale AWS run: Glint360K (all 1,385 WebDataset shards, 17.1M images,
+# 360k identities) + IResNet-100 + AdaFace + Partial-FC.
+#
+# Same code as the local config; only the data location, epoch mode, batch and
+# GPU count differ. See docs/AWS.md for instance selection and data staging.
+#
+#   python scripts/download_glint360k.py --out /mnt/data/glint360k --shards all --workers 8
+#   python -m scripts.scan_webdataset --config configs/glint360k_ir100_adaface_aws.yaml \
+#       --workers 16 --holdout 1000 --holdout-min-images 8
+#
+#   Single GPU : python -m scripts.train --config configs/glint360k_ir100_adaface_aws.yaml
+#   Multi-GPU  : torchrun --nproc_per_node=4 -m scripts.train --config configs/glint360k_ir100_adaface_aws.yaml
+#
+# Sized for 4x A10G (24 GB each). LR scales linearly with the TOTAL batch
+# (batch_size x GPUs x grad_accum): 128 x 4 = 512 -> 0.2.
+
+_base_: base.yaml
+
+experiment:
+  name: glint360k_ir100_adaface
+  seed: 3407
+
+data:
+  adapter:
+    type: webdataset
+    shards: "/mnt/data/glint360k/glint360k-{0000..1384}.tar.gz"
+    image_key: jpg
+    label_key: cls
+    min_images_per_identity: 2
+    exclude_identities_file: data/splits/glint360k_val_identities.txt
+    # resampled: every rank/worker yields exactly the same number of batches,
+    # which DDP needs. An "epoch" is samples_per_epoch draws (null -> the
+    # filtered census total, i.e. ~17M, one nominal pass).
+    epoch_mode: resampled
+    samples_per_epoch: null
+    shuffle_buffer: 5000
+    handler: warn
+
+  input_size: [112, 112]
+  resize_policy: center_crop_112   # no-op: shards are already 112x112
+
+  batch_size: 128                  # PER GPU on a 24 GB A10G
+  num_workers: 10                  # Linux forks: no __main__ guard constraint
+  persistent_workers: false        # forced off for streaming datasets
+  prefetch_factor: 6
+  pin_memory: true
+  census_workers: 16
+
+model:
+  backbone:
+    arch: ir_100
+    channels_last: false          # measured 6.7x SLOWER on RTX 3050 + torch 2.13; see scripts/bench_backbone.py
+  head:
+    type: adaface
+    scale: 64.0
+    m: 0.4
+    h: 0.333
+    t_alpha: 0.01
+    partial_fc:
+      enabled: auto                # on: 360k classes exceed the 300k threshold
+      sample_rate: 0.1
+
+optim:
+  type: sgd
+  lr: 0.2                          # linear rule from the ArcFace ref (0.1 @ 256)
+  momentum: 0.9
+  weight_decay: 5.0e-4
+  no_wd_on_bn_and_bias: true
+  clip_grad_norm: 5.0
+
+scheduler:
+  type: polylr
+  warmup_epochs: 2                 # mandatory at total batch >= 512
+  warmup_start_factor: 0.1
+  power: 2.0
+
+train:
+  epochs: 20                       # 16 recovers ~99% of accuracy at 80% cost
+  amp: true
+  amp_dtype: float16
+  grad_accum_steps: 1
+  log_every_n_steps: 50
+  save_every_n_epochs: 1
+  save_every_n_steps: 2000         # mid-epoch saves: spot-instance safety
+  eval_every_n_epochs: 1
+  keep_last_n_checkpoints: 3
+  resume: auto
+  torch_compile: true              # 20-30% on A10G/A100; auto-off on Windows
+
+eval:
+  # Held-out Glint360K identities (written by scan_webdataset --holdout) plus
+  # the standard InsightFace packs so numbers compare to published results.
+  targets:
+    - {name: glint_val, type: pairs, pair_file: data/pairs/glint360k_val_pairs.txt}
+    - {name: lfw,       type: bin,   path: /mnt/data/eval/lfw.bin}
+    - {name: cfp_fp,    type: bin,   path: /mnt/data/eval/cfp_fp.bin}
+    - {name: agedb_30,  type: bin,   path: /mnt/data/eval/agedb_30.bin}
+  batch_size: 256
+  flip_test: true
+  primary: lfw
+
+monitor:
+  tensorboard: true
+  histogram_every_n_steps: 2000

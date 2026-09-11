@@ -1,0 +1,110 @@
+# LOCAL plumbing run: Glint360K (WebDataset shards) + IResNet-50 + AdaFace on an
+# RTX 3050 (4 GB).
+#
+# This is NOT a quality run. Glint360K's shards are globally shuffled, so two
+# shards (~24k images) hold ~1.7 images per identity; after
+# min_images_per_identity=2 only a few thousand images of a few hundred
+# identities remain. That is exactly enough to prove the streaming pipeline,
+# checkpointing, resume, evaluation and reporting all work end to end. The
+# real run is configs/glint360k_ir100_adaface_aws.yaml -- same code, more
+# shards, more GPUs.
+#
+# Before the first run (each in its own terminal / process):
+#   python scripts/download_glint360k.py --out D:/data/glint360k --shards 0-1
+#   python -m scripts.scan_webdataset --config configs/glint360k_ir50_adaface_local.yaml \
+#       --holdout 100 --holdout-min-images 2
+#
+# Then:
+#   python -m scripts.train --config configs/glint360k_ir50_adaface_local.yaml --overfit 64
+#   python -m scripts.train --config configs/glint360k_ir50_adaface_local.yaml
+#
+# To train on more shards, change ONLY data.adapter.shards (and re-run the
+# scan script -- the census is keyed by the shard list).
+
+_base_: base.yaml
+
+experiment:
+  name: glint360k_ir50_adaface_local
+  seed: 3407
+
+data:
+  adapter:
+    type: webdataset
+    # Brace pattern, list of patterns, or a directory holding the shards.
+    # Whatever the download script has fetched; widen the range as more land.
+    shards: "D:/data/glint360k/glint360k-{0000..0001}.tar.gz"
+    image_key: jpg
+    label_key: cls
+    # A single image cannot be learned discriminatively; and with a shard
+    # subset most identities have exactly one.
+    min_images_per_identity: 2
+    exclude_identities_file: data/splits/glint360k_val_identities.txt
+    # natural: one pass over every shard per epoch (single process).
+    # resampled: fixed-length nominal epochs; REQUIRED for multi-GPU.
+    epoch_mode: natural
+    samples_per_epoch: null
+    # Raw (undecoded) samples buffered per worker for shuffling, ~8 KB each.
+    shuffle_buffer: 2000
+    handler: warn               # skip a corrupt sample/shard instead of aborting
+
+  # Glint360K is already RetinaFace-aligned at 112x112: no crop, no resize.
+  input_size: [112, 112]
+  resize_policy: center_crop_112   # no-op on a 112x112 source
+
+  batch_size: 64            # fits 4 GB with fragmentation headroom under AMP
+  num_workers: 4            # streaming workers; each holds one open shard
+  persistent_workers: false # forced off for streaming datasets anyway
+  prefetch_factor: 4
+  census_workers: 4         # processes used if the census must be (re)built
+
+model:
+  backbone:
+    arch: ir_50
+    channels_last: false          # measured 6.7x SLOWER on RTX 3050 + torch 2.13; see scripts/bench_backbone.py
+  head:
+    type: adaface
+    scale: 64.0
+    m: 0.4
+    h: 0.333
+    t_alpha: 0.01
+    partial_fc:
+      enabled: auto           # stays off at this class count; on above 300k
+      sample_rate: 0.1
+
+optim:
+  type: sgd
+  lr: 0.05
+  momentum: 0.9
+  weight_decay: 5.0e-4
+  no_wd_on_bn_and_bias: true
+  clip_grad_norm: 5.0
+
+scheduler:
+  type: polylr
+  warmup_epochs: 1
+  warmup_start_factor: 0.1
+  power: 2.0
+
+train:
+  epochs: 8
+  amp: true
+  amp_dtype: float16
+  grad_accum_steps: 2       # effective batch 128
+  log_every_n_steps: 10
+  save_every_n_epochs: 1
+  save_every_n_steps: 500   # mid-epoch saves (resume is epoch-granular; see docs)
+  eval_every_n_epochs: 1
+  keep_last_n_checkpoints: 3
+  resume: auto
+
+eval:
+  targets:
+    - name: glint_val
+      type: pairs
+      pair_file: data/pairs/glint360k_val_pairs.txt
+      n_folds: 10
+    # Standard InsightFace packs, once you have them (see docs/AWS.md):
+    # - {name: lfw, type: bin, path: D:/data/eval/lfw.bin}
+  batch_size: 128
+  flip_test: true
+  primary: glint_val
