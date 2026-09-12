@@ -109,5 +109,11 @@ def wrap_ddp(model: torch.nn.Module, local_rank: int, **kwargs: Any) -> torch.nn
 
 
 def unwrap(model: torch.nn.Module) -> torch.nn.Module:
-    """Get the underlying module out of a DDP wrapper (for checkpointing)."""
-    return getattr(model, "module", model)
+    """Get the underlying module out of DDP / torch.compile wrappers."""
+    while True:
+        if hasattr(model, "_orig_mod"):
+            model = model._orig_mod
+        elif isinstance(model, torch.nn.parallel.DistributedDataParallel):
+            model = model.module
+        else:
+            return model
