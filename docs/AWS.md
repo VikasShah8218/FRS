@@ -65,84 +65,100 @@ utilisation — you pay for GPUs and spend the money on IOPS.
 
 ### Do this
 
-1. **Use a packed format.** `.rec`/`.idx` (MS1MV3, Glint360K, WebFace4M ship this
-   way) — the `mxnet_rec` adapter reads it with no mxnet dependency.
+1. **Use a packed format.** Either `.rec`/`.idx` packs (MS1MV3, WebFace4M —
+   the `mxnet_rec` adapter, no mxnet dependency) or WebDataset tar shards
+   (Glint360K on HuggingFace — the streaming `webdataset` adapter).
 2. **Put it on instance-store NVMe**, not EBS:
    ```bash
    sudo mkfs -t xfs /dev/nvme1n1
    sudo mkdir -p /mnt/data && sudo mount /dev/nvme1n1 /mnt/data
    sudo chown $USER /mnt/data
-   aws s3 sync s3://your-bucket/ms1mv3/ /mnt/data/ms1mv3/
    ```
    Instance store is ephemeral — it disappears when the instance stops. Keep the
-   source of truth in S3 and checkpoints on EBS or S3.
+   source of truth in S3 (or re-download from HuggingFace) and checkpoints on
+   EBS or S3.
 3. **Watch `perf/data_time_frac` in TensorBoard.** Above 0.15 means the GPU is
    starving. The trainer warns automatically.
+
+### Glint360K: the full recipe
+
+```bash
+# all 1,385 shards, ~130 GB, resumable -- run it under tmux, in its own shell
+python scripts/download_glint360k.py --out /mnt/data/glint360k --shards all --workers 8
+
+# one pass over the labels (~15-30 min from NVMe) + hold out 1,000 identities
+python -m scripts.scan_webdataset --config configs/glint360k_ir100_adaface_aws.yaml \
+    --workers 16 --holdout 1000 --holdout-min-images 8
+```
+
+The download script imports nothing from `frs`; it can run while you are still
+editing configs, and training uses whatever `data.adapter.shards` names. The
+scan writes `data/splits/glint360k_val_identities.txt` (excluded from training)
+and `data/pairs/glint360k_val_pairs.txt` (the honest in-domain benchmark).
+Commit both: they define the protocol.
+
+### Standard benchmarks (`.bin` packs)
+
+`lfw.bin`, `cfp_fp.bin`, `agedb_30.bin` are the InsightFace verification packs
+that every published number is measured on. They are distributed alongside the
+InsightFace training sets (see the `_datasets_` page of the insightface GitHub
+repository; the MS1MV3 / Glint360K archives contain them). Copy them to
+`/mnt/data/eval/` and the `type: bin` targets in the AWS config light up.
 
 ---
 
 ## 4. Config for a full-scale run
 
-`configs/aws_ir100_adaface.yaml`:
+`configs/glint360k_ir100_adaface_aws.yaml` (abridged; the file is commented):
 
 ```yaml
 _base_: base.yaml
 
 experiment:
-  name: ms1mv3_ir100_adaface
+  name: glint360k_ir100_adaface
   seed: 3407
 
 data:
   adapter:
-    type: mxnet_rec
-    root: /mnt/data/ms1mv3
+    type: webdataset
+    shards: "/mnt/data/glint360k/glint360k-{0000..1384}.tar.gz"
+    min_images_per_identity: 2
+    exclude_identities_file: data/splits/glint360k_val_identities.txt
+    epoch_mode: resampled          # required for DDP (equal steps per rank)
+    samples_per_epoch: null        # null -> one nominal pass (~17M)
+    shuffle_buffer: 5000
   input_size: [112, 112]
-  resize_policy: center_crop_112   # .rec packs are already 112x112
+  resize_policy: center_crop_112   # shards are already 112x112 (no-op)
   batch_size: 128                  # per GPU (A10G 24 GB); 256 on A100 40 GB
-  num_workers: 10                  # Linux forks -- no __main__ constraint
-  persistent_workers: true
+  num_workers: 10
   prefetch_factor: 6
 
 model:
-  backbone:
-    arch: ir_100
-    channels_last: true
+  backbone: {arch: ir_100, channels_last: true}
   head:
     type: adaface
-    scale: 64.0
-    m: 0.4
-    partial_fc:
-      enabled: auto                # turns on above 300k classes
-      sample_rate: 0.1
+    partial_fc: {enabled: auto, sample_rate: 0.1}   # on: 360k > 300k classes
 
-optim:
-  type: sgd
-  lr: 0.2                          # linear rule: 0.1 x (512 / 256)
-  momentum: 0.9
-  weight_decay: 5.0e-4
-  no_wd_on_bn_and_bias: true
-
-scheduler:
-  type: polylr
-  warmup_epochs: 2                 # mandatory at batch >= 512
-  power: 2.0
+optim: {type: sgd, lr: 0.2, momentum: 0.9, weight_decay: 5.0e-4}   # 0.1 x (512/256)
+scheduler: {type: polylr, warmup_epochs: 2, power: 2.0}
 
 train:
   epochs: 20
   amp: true
-  amp_dtype: float16
-  save_every_n_epochs: 1
   save_every_n_steps: 2000         # spot-instance safety
   resume: auto
-  torch_compile: true              # 20-30% on A10G/A100 (Linux only)
+  torch_compile: true              # Linux only
 
 eval:
   targets:
-    - {name: lfw,      type: bin, path: /mnt/data/eval/lfw.bin}
-    - {name: cfp_fp,   type: bin, path: /mnt/data/eval/cfp_fp.bin}
-    - {name: agedb_30, type: bin, path: /mnt/data/eval/agedb_30.bin}
+    - {name: glint_val, type: pairs, pair_file: data/pairs/glint360k_val_pairs.txt}
+    - {name: lfw,       type: bin,   path: /mnt/data/eval/lfw.bin}
+    - {name: cfp_fp,    type: bin,   path: /mnt/data/eval/cfp_fp.bin}
+    - {name: agedb_30,  type: bin,   path: /mnt/data/eval/agedb_30.bin}
   primary: lfw
 ```
+
+`configs/aws_ir100_adaface.yaml` is the equivalent for `.rec` packs (MS1MV3).
 
 ---
 
@@ -150,21 +166,33 @@ eval:
 
 ### Single GPU
 ```bash
-python -m scripts.train --config configs/aws_ir100_adaface.yaml
+python -m scripts.train --config configs/glint360k_ir100_adaface_aws.yaml
 ```
 
 ### Multi-GPU
 
 ```bash
-torchrun --nproc_per_node=4 -m scripts.train --config configs/aws_ir100_adaface.yaml
+torchrun --nproc_per_node=4 -m scripts.train --config configs/glint360k_ir100_adaface_aws.yaml
 ```
 
-DDP wiring lives in `frs/utils/distributed.py`. Notes when you enable it:
+`scripts/train.py` initialises the process group from the `torchrun`
+environment (`frs/utils/distributed.py`), wraps backbone and head in
+`DistributedDataParallel`, splits the data per rank (a `DistributedSampler`
+for map-style datasets; the shard stream itself for streaming ones) and lets
+rank 0 do all logging, checkpointing and evaluation. Things to know:
 
-- **LR scales with the *total* batch.** 4 GPUs × 128 = 512, so LR 0.2.
+- **LR scales with the *total* batch.** 4 GPUs × 128 = 512, so LR 0.2. The
+  start-up banner prints the total batch.
+- **Streaming needs `epoch_mode: resampled`.** Every rank and worker then yields
+  exactly the same number of batches, which DDP needs to not deadlock.
+  `natural` mode refuses to start under DDP.
+- **Partial-FC under DDP** replicates the full classifier on every rank and
+  all-reduces its (sparse-in-practice) gradient every step: ~737 MB at 360k
+  classes. It works and is simple; a model-parallel head that shards the
+  classifier across GPUs (the InsightFace design) is the next optimisation if
+  scaling efficiency on 4-8 GPUs matters.
 - **Leave `SyncBatchNorm` off.** At 128 per GPU the per-device statistics are
   already good, and SyncBN costs throughput.
-- Rank 0 handles all logging, checkpointing and evaluation.
 
 ### Keeping it alive across SSH drops
 ```bash
@@ -244,6 +272,8 @@ Before starting an expensive run:
 - [ ] Validated the whole pipeline for an hour on a small instance
 - [ ] `python -m scripts.train --config <cfg> --overfit 100` drives loss to ~0
 - [ ] Data is packed and on instance-store NVMe, not EBS
+- [ ] Streaming: census done (`scripts/scan_webdataset.py`), hold-out written,
+      `epoch_mode: resampled` for multi-GPU
 - [ ] `perf/data_time_frac` < 0.10 in the validation run
 - [ ] Validation identities are excluded from training (or you are using standard
       `.bin` eval packs)
