@@ -45,6 +45,7 @@ import numpy as np
 import torch
 
 from ..data.class_map import ClassMap
+from ..models.partial_fc import unwrap_partial_fc
 
 logger = logging.getLogger(__name__)
 
@@ -143,21 +144,28 @@ def save_checkpoint(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Always describe and store the *inner* margin head. Partial-FC is a
+    # training-time wrapper; recording ``sample_rate`` is provenance only.
+    inner_head = unwrap_partial_fc(unwrap_model(head))
+    partial_fc_rate = getattr(unwrap_model(head), "sample_rate", None)
+    backbone_inner = unwrap_model(backbone)
+
     payload: dict[str, Any] = {
         "format_version": CHECKPOINT_FORMAT_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "epoch": int(epoch),
         "global_step": int(global_step),
         "backbone": {
-            "arch": getattr(backbone, "arch", "unknown"),
-            "input_size": list(getattr(backbone, "input_size", (112, 112))),
-            "embedding_size": int(getattr(backbone, "embedding_size", 512)),
+            "arch": getattr(backbone_inner, "arch", "unknown"),
+            "input_size": list(getattr(backbone_inner, "input_size", (112, 112))),
+            "embedding_size": int(getattr(backbone_inner, "embedding_size", 512)),
             "state_dict": _cpu_state_dict(backbone),
         },
         "head": {
-            "type": type(head).__name__,
-            "num_classes": int(getattr(head, "num_classes", 0)),
-            "embedding_size": int(getattr(head, "embedding_size", 512)),
+            "type": type(inner_head).__name__,
+            "num_classes": int(getattr(inner_head, "num_classes", 0)),
+            "embedding_size": int(getattr(inner_head, "embedding_size", 512)),
+            "partial_fc": partial_fc_rate,
             "state_dict": _cpu_state_dict(head),
         },
         "metrics": metrics or {},
@@ -201,11 +209,12 @@ def save_backbone_only(
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    inner = unwrap_model(backbone)
     payload = {
         "format_version": CHECKPOINT_FORMAT_VERSION,
-        "arch": getattr(backbone, "arch", "unknown"),
-        "input_size": list(getattr(backbone, "input_size", (112, 112))),
-        "embedding_size": int(getattr(backbone, "embedding_size", 512)),
+        "arch": getattr(inner, "arch", "unknown"),
+        "input_size": list(getattr(inner, "input_size", (112, 112))),
+        "embedding_size": int(getattr(inner, "embedding_size", 512)),
         "state_dict": _cpu_state_dict(backbone),
         "num_training_identities": class_map.num_classes if class_map else None,
     }
@@ -215,8 +224,21 @@ def save_backbone_only(
     return str(path)
 
 
+def unwrap_model(module: torch.nn.Module) -> torch.nn.Module:
+    """Strip DDP and ``torch.compile`` wrappers in whichever order they were applied."""
+    while True:
+        if hasattr(module, "_orig_mod"):  # torch.compile
+            module = module._orig_mod
+        elif hasattr(module, "module") and isinstance(
+            getattr(module, "module"), torch.nn.Module
+        ) and type(module).__name__ in ("DistributedDataParallel", "DataParallel"):
+            module = module.module
+        else:
+            return module
+
+
 def _cpu_state_dict(module: torch.nn.Module) -> dict[str, torch.Tensor]:
-    inner = getattr(module, "module", module)  # unwrap DDP
+    inner = unwrap_partial_fc(unwrap_model(module))  # Partial-FC -> bare margin head
     return {k: v.detach().cpu() for k, v in inner.state_dict().items()}
 
 
@@ -263,6 +285,12 @@ def load_checkpoint(
         ClassMap.from_dict(ckpt["class_map"]) if ckpt.get("class_map") else None
     )
     state.class_map = ckpt_map
+
+    # Load into the bare modules: the checkpoint stores inner-module tensors.
+    if backbone is not None:
+        backbone = unwrap_model(backbone)
+    if head is not None:
+        head = unwrap_partial_fc(unwrap_model(head))
 
     head_state = dict(ckpt.get("head", {}).get("state_dict", {}))
     old_classes = int(ckpt.get("head", {}).get("num_classes", 0))
@@ -433,12 +461,15 @@ def extend_head_and_optimizer(
     w_new[:old_num_classes] = w_old  # preserve every learned prototype
     head_state["weight"] = w_new
 
-    if head is not None:
-        # Resize the live module so load_state_dict does not complain.
+    if head is not None and tuple(head.weight.shape) != (new_num_classes, dim):
+        # Resize the live module so load_state_dict does not complain. Only
+        # when needed: replacing the Parameter object would orphan it from an
+        # optimizer that was already built around it.
         head.weight = torch.nn.Parameter(
             torch.empty(new_num_classes, dim, device=head.weight.device,
                         dtype=head.weight.dtype)
         )
+    if head is not None:
         head.num_classes = new_num_classes
 
     optimizer_state = _extend_optimizer_state(
@@ -491,6 +522,21 @@ def _extend_optimizer_state(
 
 
 # ------------------------------------------------------------------ utilities
+
+
+def peek_class_map(path: str | os.PathLike) -> ClassMap | None:
+    """Read only the ClassMap out of a checkpoint (before any model is built).
+
+    ``scripts/train.py`` uses this to build the dataset *against the
+    checkpoint's index assignment* and append new identities to it, instead of
+    rebuilding a fresh map that would not line up with the trained head rows.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return None
+    ckpt = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+    data = ckpt.get("class_map")
+    return ClassMap.from_dict(data) if data else None
 
 
 def find_latest_checkpoint(output_dir: str | os.PathLike) -> str | None:
