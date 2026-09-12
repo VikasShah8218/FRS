@@ -28,7 +28,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from ..data.class_map import ClassMap
-from ..eval.verification import evaluate_target, format_results
+from ..eval.verification import format_results
+from ..utils.distributed import barrier, unwrap
 from ..utils.tensorboard import TensorBoardLogger
 from .checkpoint import (
     prune_checkpoints,
@@ -64,6 +65,8 @@ class Trainer:
         global_step: int = 0,
         history: list[dict] | None = None,
         best_metrics: dict[str, float] | None = None,
+        dataset_stats: dict[str, Any] | None = None,
+        is_main: bool = True,
     ) -> None:
         self.cfg = cfg
         self.backbone = backbone
@@ -74,6 +77,12 @@ class Trainer:
         self.class_map = class_map
         self.device = device
         self.eval_fn = eval_fn
+        # Stored in every checkpoint so `evaluate --report` can describe the
+        # dataset without re-scanning (or re-streaming) it.
+        self.dataset_stats = dict(dataset_stats or {})
+        # Under DDP only rank 0 logs to TensorBoard, evaluates and writes
+        # checkpoints; the other ranks just train and wait at the barriers.
+        self.is_main = bool(is_main)
 
         self.epoch = start_epoch
         self.global_step = global_step
@@ -108,7 +117,8 @@ class Trainer:
 
         monitor = cfg.get("monitor", {})
         self.tb = TensorBoardLogger(
-            self.output_dir / "tensorboard", enabled=bool(monitor.get("tensorboard", True))
+            self.output_dir / "tensorboard",
+            enabled=bool(monitor.get("tensorboard", True)) and self.is_main,
         )
         self.log_grad_norm = bool(monitor.get("log_grad_norm", True))
         self.log_feature_norm = bool(monitor.get("log_feature_norm", True))
@@ -122,8 +132,12 @@ class Trainer:
 
     def _forward(
         self, images: torch.Tensor, labels: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Backbone under autocast, margin head in fp32.
+
+        Returns ``(loss, logits, norms, labels_for_logits)``. The last item is
+        the label tensor that indexes ``logits`` -- identical to ``labels``
+        unless Partial-FC remapped them onto its sampled class subset.
 
         The head must not run in fp16: it computes ``acos`` near the domain edge
         and a softmax over a (B x num_classes) matrix, both of which lose
@@ -136,15 +150,23 @@ class Trainer:
             embeddings, norms = self.backbone(images)
 
         with torch.autocast(device_type=self.device.type, enabled=False):
-            logits = self.head(embeddings.float(), norms.float(), labels)
-            loss = F.cross_entropy(logits, labels, label_smoothing=self.label_smoothing)
+            out = self.head(embeddings.float(), norms.float(), labels)
+            # Partial-FC returns (logits over the sampled subset, remapped
+            # labels); a bare head returns logits over every class.
+            if isinstance(out, tuple):
+                logits, loss_labels = out
+            else:
+                logits, loss_labels = out, labels
+            loss = F.cross_entropy(
+                logits, loss_labels, label_smoothing=self.label_smoothing
+            )
 
-        return loss, logits, norms
+        return loss, logits, norms, loss_labels
 
     def _train_step(
         self, images: torch.Tensor, labels: torch.Tensor, accum_index: int
     ) -> dict[str, float]:
-        loss, logits, norms = self._forward(images, labels)
+        loss, logits, norms, labels = self._forward(images, labels)
 
         if not torch.isfinite(loss):
             raise RuntimeError(
@@ -193,9 +215,14 @@ class Trainer:
         grad_meter = AverageMeter()
         throughput = ThroughputMeter()
 
+        # Both a DistributedSampler and a streaming dataset need to know the
+        # epoch to derive a fresh, reproducible order.
         sampler = getattr(self.train_loader, "sampler", None)
         if hasattr(sampler, "set_epoch"):
             sampler.set_epoch(self.epoch)
+        dataset = getattr(self.train_loader, "dataset", None)
+        if hasattr(dataset, "set_epoch"):
+            dataset.set_epoch(self.epoch)
 
         self.optimizer.zero_grad(set_to_none=True)
         epoch_start = time.perf_counter()
@@ -227,6 +254,7 @@ class Trainer:
             if (
                 self.save_every_steps > 0
                 and self.global_step % self.save_every_steps == 0
+                and self.is_main
             ):
                 # Mid-epoch checkpoint: what makes spot instances safe.
                 self._save("last.pt")
@@ -294,6 +322,14 @@ class Trainer:
             self.steps_per_epoch,
             self.steps_per_epoch * self.epochs,
         )
+        if self.epoch >= self.epochs:
+            logger.warning(
+                "Checkpoint is already at epoch %d >= train.epochs (%d): nothing to "
+                "train. Raise train.epochs to continue this run.",
+                self.epoch, self.epochs,
+            )
+            self.tb.close()
+            return self.history
 
         for epoch in range(self.epoch, self.epochs):
             self.epoch = epoch
@@ -318,7 +354,9 @@ class Trainer:
 
             eval_results: dict[str, Any] = {}
             if self.eval_fn and (epoch + 1) % self.eval_every == 0:
-                eval_results = self.eval_fn(self.backbone)
+                if self.is_main:
+                    eval_results = self.eval_fn(unwrap(self.backbone))
+                barrier()  # other ranks wait for rank 0's evaluation
                 if eval_results:
                     logger.info("\n%s", format_results(eval_results))
                     for name, res in eval_results.items():
@@ -333,14 +371,18 @@ class Trainer:
                         )
 
             self.history.append(epoch, **metrics)
-            self._maybe_save_best(metrics)
+            if self.is_main:
+                self._maybe_save_best(metrics)
+                if (epoch + 1) % self.save_every == 0:
+                    self._save("last.pt")
+                    prune_checkpoints(self.ckpt_dir, self.keep_last_n)
+            barrier()
 
-            if (epoch + 1) % self.save_every == 0:
-                self._save("last.pt")
-                prune_checkpoints(self.ckpt_dir, self.keep_last_n)
-
-        self._save("last.pt")
-        save_backbone_only(self.ckpt_dir / "backbone_only.pt", self.backbone, self.class_map)
+        if self.is_main:
+            self._save("last.pt")
+            save_backbone_only(
+                self.ckpt_dir / "backbone_only.pt", self.backbone, self.class_map
+            )
         self.tb.close()
         logger.info("Training complete. Best: %s", self.best_metrics or "(no eval)")
         return self.history
@@ -372,4 +414,5 @@ class Trainer:
             config=self.cfg.to_dict(),
             metrics=self.best_metrics,
             history=self.history.to_list(),
+            extra={"dataset_stats": self.dataset_stats} if self.dataset_stats else None,
         )
