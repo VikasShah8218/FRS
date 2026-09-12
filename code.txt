@@ -1,1 +1,20 @@
 py -m scripts.train --config configs/meglass_ir50_adaface.yaml
+
+
+
+
+
+
+
+
+
+
+https://huggingface.co/datasets/gaunernst/glint360k-wds-gz/blob/main/README.md
+
+
+import webdataset as wds
+
+url = "https://huggingface.co/datasets/gaunernst/glint360k-wds-gz/resolve/main/glint360k-{0000..1384}.tar.gz"
+ds = wds.WebDataset(url).decode("pil").to_tuple("jpg", "cls")
+
+img, label = next(iter(ds))
