@@ -260,3 +260,43 @@ def test_atomic_write_leaves_no_temp_file(tmp_path):
     save_checkpoint(path, backbone=backbone, head=head, class_map=make_class_map())
     assert path.is_file()
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_peek_class_map_and_resume_with_presized_head(tmp_path):
+    """The resume-after-extension flow used by scripts/train.py.
+
+    train.py peeks the checkpoint's map, appends the dataset's new identities,
+    builds the head at the merged size, then loads. The head Parameter must NOT
+    be replaced during the load (the optimizer already references it) and the
+    new rows must be initialised while the old ones are bit-identical.
+    """
+    from frs.engine.checkpoint import peek_class_map
+
+    backbone, head, optimizer = build_stack()
+    class_map = make_class_map()
+    path = tmp_path / "ckpt.pt"
+    save_checkpoint(path, backbone=backbone, head=head, optimizer=optimizer,
+                    class_map=class_map, epoch=2)
+
+    peeked = peek_class_map(path)
+    assert peeked is not None and peeked.index_to_identity == class_map.index_to_identity
+    assert peek_class_map(tmp_path / "missing.pt") is None
+
+    merged = ClassMap.from_dict(peeked.to_dict())
+    result = merged.extend(["zz_new_1", "zz_new_2"])
+    assert result.num_added == 2
+
+    new_backbone, new_head, new_optimizer = build_stack(num_classes=merged.num_classes)
+    weight_before = new_head.weight
+    state = load_checkpoint(path, backbone=new_backbone, head=new_head,
+                            optimizer=new_optimizer, class_map=merged)
+    assert state.extended and state.class_map.num_classes == CLASSES + 2
+    assert new_head.weight is weight_before  # same Parameter object -> optimizer still valid
+    torch.testing.assert_close(new_head.weight[:CLASSES], head.weight)
+    assert new_head.num_classes == CLASSES + 2
+
+    # and the optimizer can take a step against the extended head
+    emb = torch.randn(4, DIM)
+    logits = new_head(emb, None, torch.tensor([0, 1, CLASSES, CLASSES + 1]))
+    logits.sum().backward()
+    new_optimizer.step()
