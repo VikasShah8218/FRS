@@ -73,6 +73,10 @@ class MarginHead(nn.Module):
         self.scale = float(scale)
 
         self.weight = nn.Parameter(torch.empty(self.num_classes, self.embedding_size))
+        # Partial-FC temporarily substitutes a *view* of ``weight`` (the sampled
+        # rows) here. A plain attribute, not a Parameter or buffer: it must never
+        # appear in ``state_dict`` and must never be re-assigned as a Parameter.
+        self._weight_override: torch.Tensor | None = None
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -89,7 +93,8 @@ class MarginHead(nn.Module):
         correct with any backbone.
         """
         x = F.normalize(embeddings, dim=1)
-        w = F.normalize(self.weight, dim=1)
+        weight = self._weight_override if self._weight_override is not None else self.weight
+        w = F.normalize(weight, dim=1)
         return F.linear(x, w).clamp(-1.0 + EPS, 1.0 - EPS)
 
     def forward(
