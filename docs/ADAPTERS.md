@@ -41,7 +41,8 @@ simply appends new rows to an existing head.
 | `flat_regex` | Flat folder, identity in the filename | `pattern`, `extensions` |
 | `folder_per_identity` | `root/alice/*.jpg` | `recursive` |
 | `csv_manifest` | CSV of `path,identity` | `path_column`, `identity_column`, `delimiter` |
-| `mxnet_rec` | `.rec`/`.idx` packs (MS1MV3, Glint360K) | `rec_name`, `idx_name` |
+| `mxnet_rec` | `.rec`/`.idx` packs (MS1MV3, WebFace4M) | `rec_name`, `idx_name` |
+| `webdataset` | `.tar`/`.tar.gz` shards of `<key>.jpg` + `<key>.cls` (Glint360K) — **streaming**, see below | `shards`, `epoch_mode`, `shuffle_buffer` |
 
 Every adapter also supports:
 
@@ -224,6 +225,46 @@ Sanity checks worth doing:
   discriminatively. Set `min_images_per_identity: 2` or higher.
 - **Image shape** — must be `HWC uint8` RGB. Grayscale or BGR will train but
   degrade accuracy silently.
+
+---
+
+## Streaming adapters
+
+A second contract exists for data that cannot be enumerated or indexed: gzip
+tar shards holding millions of images, where a list of samples would cost
+gigabytes per worker and random access is impossible. `frs/data/adapters/streaming.py`
+defines it; `webdataset.py` implements it for Glint360K-style shards.
+
+A `StreamingAdapter` answers different questions than a `DatasetAdapter`:
+
+| Method | Purpose |
+|---|---|
+| `shard_list()` | Ordered list of shard paths/URLs (from a brace pattern, a list, or a directory) |
+| `census(workers)` | One sequential pass reading only the labels: images per identity. Cached as JSON by `cache_key`. |
+| `iter_raw(epoch, seed, rank, world_size, worker, num_workers)` | Stream `(encoded_bytes, raw_id)` for this worker's share of this epoch |
+| `decode(bytes)` | Encoded image -> RGB `HWC uint8` |
+| `identity_of(raw_id)` | `prefix + str(raw_id)` — **still a string** |
+
+The census replaces `scan()`: the `ClassMap`, `__len__`, the report's
+statistics and the `min_images_per_identity` / `exclude_identities_file`
+filters are all derived from it, so changing a filter never re-streams the
+shards. Filtering happens in the workers through a small `int32` lookup table
+(raw id -> class index, `-1` for dropped), the only thing besides the config
+and the transform that gets pickled to them.
+
+Epochs come in two modes. `natural` streams every shard once (rank, then
+worker, partition of the shard list); it is exact and is the default for a
+single process. `resampled` draws shards with replacement and cuts every
+worker's stream to the same multiple of the batch size, so all ranks under DDP
+run the same number of steps — DDP refuses to start without it.
+
+Everything downstream is shared: `build_dataset()` returns a
+`FaceIterableDataset` instead of a `FaceTrainDataset`, and the trainer,
+checkpoints, `extend_classmap` and the report do not know the difference.
+
+To add another streaming format (LMDB, a custom pack), subclass
+`StreamingAdapter`, implement the five methods above, register it, and reuse
+`cached_census` and `buffered_shuffle` from `streaming.py`.
 
 ---
 
