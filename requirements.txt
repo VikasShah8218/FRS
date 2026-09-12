@@ -25,6 +25,10 @@ scikit-learn>=1.4
 opencv-python-headless>=4.9
 onnxruntime>=1.17          # SCRFD face detector (swap for onnxruntime-gpu on AWS)
 
+# --- streaming datasets (Glint360K WebDataset shards) ---
+webdataset>=1.0            # brace expansion of shard patterns
+huggingface_hub>=0.30      # scripts/download_glint360k.py (resumable downloads)
+
 # --- export (optional; only needed by scripts/export.py --format onnx) ---
 onnx>=1.16
 onnxscript>=0.1          # required by torch>=2.9's ONNX exporter
