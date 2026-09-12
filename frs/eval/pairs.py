@@ -204,3 +204,27 @@ def load_pair_images(
     index_pairs = np.array([[unique[a], unique[b]] for a, b, _ in pairs], dtype=np.int64)
     is_same = np.array([same for _, _, same in pairs], dtype=bool)
     return images, index_pairs, is_same
+
+
+EVAL_TARGET_TYPES = ("pairs", "bin")
+
+
+def load_eval_images(
+    target: dict[str, Any], transform: Any
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Dispatch on ``target["type"]``: ``pairs`` (text pair file) or ``bin``.
+
+    Both loaders return ``(images, index_pairs, is_same)`` so
+    :func:`frs.eval.verification.evaluate_target` is format-agnostic.
+    """
+    kind = str(target.get("type", "pairs")).lower()
+    if kind == "pairs":
+        return load_pair_images(target, transform)
+    if kind == "bin":
+        from .bin_pack import load_bin_images
+
+        return load_bin_images(target, transform)
+    raise ValueError(
+        f"eval target {target.get('name')!r}: unknown type {kind!r}; "
+        f"expected one of {EVAL_TARGET_TYPES}"
+    )
