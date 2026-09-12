@@ -200,23 +200,31 @@ def save_checkpoint(
 
 
 def save_backbone_only(
-    path: str | os.PathLike, backbone: torch.nn.Module, class_map: ClassMap | None = None
+    path: str | os.PathLike,
+    backbone: torch.nn.Module,
+    model_name: str | None = None,
 ) -> str:
     """Write a deployment artifact: backbone weights, no head, no optimizer.
 
     Inference only ever needs embeddings, so shipping the margin head (and its
     per-class rows) wastes space and leaks the training identity list.
+
+    This is the **only** file that should leave the building. It carries the
+    weights, the input contract and a model name -- and deliberately nothing
+    about who was in the training set, what loss shaped the embedding space, or
+    what hyperparameters were used. ``best.pt`` and ``last.pt`` carry all of
+    that (they must, to resume and to extend), so they stay internal.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     inner = unwrap_model(backbone)
     payload = {
         "format_version": CHECKPOINT_FORMAT_VERSION,
+        "model_name": model_name or "unnamed",
         "arch": getattr(inner, "arch", "unknown"),
         "input_size": list(getattr(inner, "input_size", (112, 112))),
         "embedding_size": int(getattr(inner, "embedding_size", 512)),
         "state_dict": _cpu_state_dict(backbone),
-        "num_training_identities": class_map.num_classes if class_map else None,
     }
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(payload, tmp)

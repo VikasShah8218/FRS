@@ -1,12 +1,12 @@
 """Training entry point.
 
     python -m scripts.train --config configs/meglass_ir50_adaface.yaml
-    python -m scripts.train --config configs/glint360k_ir50_adaface_local.yaml
+    python -m scripts.train --config configs/essi_fr_v1_local.yaml
     python -m scripts.train --config configs/... --set train.epochs=2 data.batch_size=32
     python -m scripts.train --config configs/... --overfit 100
 
     # multi-GPU (Linux / AWS)
-    torchrun --nproc_per_node=4 -m scripts.train --config configs/glint360k_ir100_adaface_aws.yaml
+    torchrun --nproc_per_node=4 -m scripts.train --config configs/essi_fr_v1_aws.yaml
 
 Two kinds of dataset flow through the same loop:
 

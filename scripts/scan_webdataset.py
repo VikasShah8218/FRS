@@ -3,10 +3,10 @@
 **Run this before the first training run on a streaming dataset.**
 
     # 1. census only: count images per identity, cache it, print a summary
-    python -m scripts.scan_webdataset --config configs/glint360k_ir50_adaface_local.yaml
+    python -m scripts.scan_webdataset --config configs/essi_fr_v1_local.yaml
 
     # 2. also hold out identities for an honest verification benchmark
-    python -m scripts.scan_webdataset --config configs/glint360k_ir50_adaface_local.yaml \\
+    python -m scripts.scan_webdataset --config configs/essi_fr_v1_local.yaml \\
         --holdout 100 --holdout-min-images 2 \\
         --holdout-out data/glint360k_val \\
         --identities-out data/splits/glint360k_val_identities.txt \\

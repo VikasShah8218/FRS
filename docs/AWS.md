@@ -87,7 +87,7 @@ utilisation — you pay for GPUs and spend the money on IOPS.
 python scripts/download_glint360k.py --out /mnt/data/glint360k --shards all --workers 8
 
 # one pass over the labels (~15-30 min from NVMe) + hold out 1,000 identities
-python -m scripts.scan_webdataset --config configs/glint360k_ir100_adaface_aws.yaml \
+python -m scripts.scan_webdataset --config configs/essi_fr_v1_aws.yaml \
     --workers 16 --holdout 1000 --holdout-min-images 8
 ```
 
@@ -109,13 +109,13 @@ repository; the MS1MV3 / Glint360K archives contain them). Copy them to
 
 ## 4. Config for a full-scale run
 
-`configs/glint360k_ir100_adaface_aws.yaml` (abridged; the file is commented):
+`configs/essi_fr_v1_aws.yaml` (abridged; the file is commented):
 
 ```yaml
 _base_: base.yaml
 
 experiment:
-  name: glint360k_ir100_adaface
+  name: essi_fr_v1
   seed: 3407
 
 data:
@@ -166,13 +166,13 @@ eval:
 
 ### Single GPU
 ```bash
-python -m scripts.train --config configs/glint360k_ir100_adaface_aws.yaml
+python -m scripts.train --config configs/essi_fr_v1_aws.yaml
 ```
 
 ### Multi-GPU
 
 ```bash
-torchrun --nproc_per_node=4 -m scripts.train --config configs/glint360k_ir100_adaface_aws.yaml
+torchrun --nproc_per_node=4 -m scripts.train --config configs/essi_fr_v1_aws.yaml
 ```
 
 `scripts/train.py` initialises the process group from the `torchrun`
@@ -253,15 +253,26 @@ rate rather than the class count, at negligible accuracy cost.
 ## 9. Getting results back
 
 ```bash
-# Checkpoints and report
-aws s3 sync runs/ms1mv3_ir100_adaface/ s3://your-bucket/runs/ms1mv3_ir100_adaface/
+# Checkpoints and report -- INTERNAL, private bucket
+aws s3 sync runs/essi_fr_v1/ s3://your-bucket/runs/essi_fr_v1/
 
 # The deployment artifact -- backbone only, no head (~250 MB for IR-100)
-aws s3 cp runs/ms1mv3_ir100_adaface/checkpoints/backbone_only.pt \
-          s3://your-bucket/models/
+aws s3 cp runs/essi_fr_v1/checkpoints/backbone_only.pt s3://your-bucket/models/
 ```
 
 Keep `best.pt` too — it is what you extend when new identities arrive later.
+
+### What may leave the building
+
+| File | Contains | Share? |
+|---|---|---|
+| `backbone_only.pt`, `*.onnx`, `*.meta.json` | Weights, input contract, model name | **Yes** — this is the product |
+| `best.pt`, `last.pt` | The above **plus** the full identity list, the loss and every hyperparameter | **No** — internal only |
+| `report.html`, TensorBoard logs | Accuracy curves, dataset statistics | Internal; share figures selectively |
+
+`scripts/export.py` produces the shippable form and stamps it with
+`--model-name`. Anyone holding the exported model can compute embeddings and
+fine-tune from it; nobody can recover who was in the training set.
 
 ---
 

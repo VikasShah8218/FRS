@@ -478,12 +478,12 @@ WebDataset shards of ~94 MB. The images are already RetinaFace-aligned at
 python scripts/download_glint360k.py --out D:/data/glint360k --shards 0-1
 
 # 2. Census + hold-out split (the streaming equivalent of build_meglass_pairs)
-python -m scripts.scan_webdataset --config configs/glint360k_ir50_adaface_local.yaml \
+python -m scripts.scan_webdataset --config configs/essi_fr_v1_local.yaml \
     --holdout 100 --holdout-min-images 2
 
 # 3. Plumbing check, then train
-python -m scripts.train --config configs/glint360k_ir50_adaface_local.yaml --overfit 64
-python -m scripts.train --config configs/glint360k_ir50_adaface_local.yaml
+python -m scripts.train --config configs/essi_fr_v1_local.yaml --overfit 64
+python -m scripts.train --config configs/essi_fr_v1_local.yaml
 ```
 
 To train on more data, change **only** `data.adapter.shards` (a brace pattern,
@@ -706,11 +706,11 @@ python -m scripts.extend_classmap --checkpoint ... --config ... --dry-run
 
 # Glint360K (streaming): download -> census + hold-out -> train
 python scripts/download_glint360k.py --out D:/data/glint360k --shards 0-1
-python -m scripts.scan_webdataset --config configs/glint360k_ir50_adaface_local.yaml --holdout 100 --holdout-min-images 2
-python -m scripts.train --config configs/glint360k_ir50_adaface_local.yaml
+python -m scripts.scan_webdataset --config configs/essi_fr_v1_local.yaml --holdout 100 --holdout-min-images 2
+python -m scripts.train --config configs/essi_fr_v1_local.yaml
 
 # Multi-GPU (Linux)
-torchrun --nproc_per_node=4 -m scripts.train --config configs/glint360k_ir100_adaface_aws.yaml
+torchrun --nproc_per_node=4 -m scripts.train --config configs/essi_fr_v1_aws.yaml
 
 # Raw GPU throughput of a backbone (pick channels_last / batch before a long run)
 python -m scripts.bench_backbone --arch ir_50 --batch 64

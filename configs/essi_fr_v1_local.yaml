@@ -1,22 +1,22 @@
-# LOCAL plumbing run: Glint360K (WebDataset shards) + IResNet-50 + AdaFace on an
-# RTX 3050 (4 GB).
+# ESSI-FR v1 -- LOCAL plumbing run.
+#
+# Glint360K (WebDataset shards) + IResNet-50 + AdaFace on an RTX 3050 (4 GB).
 #
 # This is NOT a quality run. Glint360K's shards are globally shuffled, so two
 # shards (~24k images) hold ~1.7 images per identity; after
 # min_images_per_identity=2 only a few thousand images of a few hundred
 # identities remain. That is exactly enough to prove the streaming pipeline,
 # checkpointing, resume, evaluation and reporting all work end to end. The
-# real run is configs/glint360k_ir100_adaface_aws.yaml -- same code, more
-# shards, more GPUs.
+# real run is configs/essi_fr_v1_aws.yaml -- same code, more shards, more GPUs.
 #
 # Before the first run (each in its own terminal / process):
 #   python scripts/download_glint360k.py --out D:/data/glint360k --shards 0-1
-#   python -m scripts.scan_webdataset --config configs/glint360k_ir50_adaface_local.yaml \
+#   python -m scripts.scan_webdataset --config configs/essi_fr_v1_local.yaml \
 #       --holdout 100 --holdout-min-images 2
 #
 # Then:
-#   python -m scripts.train --config configs/glint360k_ir50_adaface_local.yaml --overfit 64
-#   python -m scripts.train --config configs/glint360k_ir50_adaface_local.yaml
+#   python -m scripts.train --config configs/essi_fr_v1_local.yaml --overfit 64
+#   python -m scripts.train --config configs/essi_fr_v1_local.yaml
 #
 # To train on more shards, change ONLY data.adapter.shards (and re-run the
 # scan script -- the census is keyed by the shard list).
@@ -24,7 +24,7 @@
 _base_: base.yaml
 
 experiment:
-  name: glint360k_ir50_adaface_local
+  name: essi_fr_v1_local
   seed: 3407
 
 data:

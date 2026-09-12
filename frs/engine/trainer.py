@@ -381,7 +381,9 @@ class Trainer:
         if self.is_main:
             self._save("last.pt")
             save_backbone_only(
-                self.ckpt_dir / "backbone_only.pt", self.backbone, self.class_map
+                self.ckpt_dir / "backbone_only.pt",
+                self.backbone,
+                model_name=str(self.cfg.get_path("experiment.name", "unnamed")),
             )
         self.tb.close()
         logger.info("Training complete. Best: %s", self.best_metrics or "(no eval)")

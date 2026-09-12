@@ -50,17 +50,17 @@ The report lands at `runs/meglass_ir50_adaface/report/report.html`.
 python scripts/download_glint360k.py --out D:/data/glint360k --shards 0-1
 
 # 2. Census + held-out identities + verification pairs (run once)
-python -m scripts.scan_webdataset --config configs/glint360k_ir50_adaface_local.yaml \
+python -m scripts.scan_webdataset --config configs/essi_fr_v1_local.yaml \
     --holdout 100 --holdout-min-images 2
 
 # 3. Prove the plumbing, then train
-python -m scripts.train --config configs/glint360k_ir50_adaface_local.yaml --overfit 64
-python -m scripts.train --config configs/glint360k_ir50_adaface_local.yaml
+python -m scripts.train --config configs/essi_fr_v1_local.yaml --overfit 64
+python -m scripts.train --config configs/essi_fr_v1_local.yaml
 ```
 
 The images are already RetinaFace-aligned at 112x112: no detection or cropping
 happens in training. To scale up, change only `data.adapter.shards` (and use
-`configs/glint360k_ir100_adaface_aws.yaml` with `torchrun` on AWS).
+`configs/essi_fr_v1_aws.yaml` with `torchrun` on AWS).
 
 **→ Read [docs/GUIDE.md](docs/GUIDE.md) for the full walkthrough.**
 
@@ -136,7 +136,7 @@ python -m scripts.extend_classmap --checkpoint runs/<exp>/checkpoints/best.pt \
     --config configs/new_data.yaml --dry-run
 
 # Multi-GPU (Linux / AWS)
-torchrun --nproc_per_node=4 -m scripts.train --config configs/glint360k_ir100_adaface_aws.yaml
+torchrun --nproc_per_node=4 -m scripts.train --config configs/essi_fr_v1_aws.yaml
 
 pytest tests/ -q
 ```
