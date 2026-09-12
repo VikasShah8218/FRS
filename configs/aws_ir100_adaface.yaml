@@ -33,7 +33,7 @@ data:
 model:
   backbone:
     arch: ir_100
-    channels_last: true
+    channels_last: false          # measured 6.7x SLOWER on RTX 3050 + torch 2.13; see scripts/bench_backbone.py
   head:
     type: adaface
     scale: 64.0
