@@ -427,14 +427,15 @@ What happens internally:
 Adding a format takes about 40 lines and touches no training code. See
 [ADAPTERS.md](ADAPTERS.md) for the full walkthrough.
 
-Four adapters ship already:
+Five adapters ship already:
 
-| `type` | Layout |
-|---|---|
-| `flat_regex` | Flat folder, identity in the filename (MeGlass) |
-| `folder_per_identity` | `root/alice/*.jpg`, `root/bob/*.jpg` |
-| `csv_manifest` | A CSV of `path,identity` |
-| `mxnet_rec` | `.rec`/`.idx` packs (MS1MV3, Glint360K, WebFace4M) |
+| `type` | Layout | Kind |
+|---|---|---|
+| `flat_regex` | Flat folder, identity in the filename (MeGlass) | map-style |
+| `folder_per_identity` | `root/alice/*.jpg`, `root/bob/*.jpg` | map-style |
+| `csv_manifest` | A CSV of `path,identity` | map-style |
+| `mxnet_rec` | `.rec`/`.idx` packs (MS1MV3, WebFace4M) | map-style |
+| `webdataset` | `.tar`/`.tar.gz` shards of `<key>.jpg` + `<key>.cls` (Glint360K) | **streaming** |
 
 Switching is a config change:
 ```yaml
@@ -449,6 +450,49 @@ The contract that makes this work: adapters return **string** identities, never
 integer indices. The ClassMap assigns indices. That single decision is what lets
 a new dataset extend an existing head.
 
+### Map-style vs streaming
+
+Map-style adapters enumerate every sample once (`scan()`) and read any sample
+on demand. Streaming adapters never enumerate: a one-off **census** counts
+images per identity, and each epoch every DataLoader worker streams its share
+of the shards. Same training loop, same checkpoints, same reports. The
+differences you will notice:
+
+| | map-style | streaming |
+|---|---|---|
+| Samplers (`balanced_identity`, `sqrt_frequency`) | yes | `random` only |
+| `persistent_workers` | yes | forced off (a few seconds per epoch) |
+| `--overfit N` | first N samples | first N samples, decoded into RAM |
+| Resume | epoch-granular | epoch-granular |
+| Multi-GPU | `DistributedSampler` | `epoch_mode: resampled` |
+
+### Training on Glint360K
+
+Glint360K (17.1M images, 360k identities) ships on HuggingFace as 1,385
+WebDataset shards of ~94 MB. The images are already RetinaFace-aligned at
+112x112 -- **no detection, no cropping**; they go straight into the network.
+
+```bash
+# 1. Download shards -- standalone script, run it in its own terminal.
+#    Two shards is enough to prove the plumbing; "all" is ~130 GB.
+python scripts/download_glint360k.py --out D:/data/glint360k --shards 0-1
+
+# 2. Census + hold-out split (the streaming equivalent of build_meglass_pairs)
+python -m scripts.scan_webdataset --config configs/glint360k_ir50_adaface_local.yaml \
+    --holdout 100 --holdout-min-images 2
+
+# 3. Plumbing check, then train
+python -m scripts.train --config configs/glint360k_ir50_adaface_local.yaml --overfit 64
+python -m scripts.train --config configs/glint360k_ir50_adaface_local.yaml
+```
+
+To train on more data, change **only** `data.adapter.shards` (a brace pattern,
+a list, or a directory) and re-run the scan script: the census is keyed by the
+shard list and rebuilds itself. Because the shards are globally shuffled, a
+small subset has ~1 image per identity -- keep `min_images_per_identity: 2`
+and expect a plumbing run, not an accuracy run, until you have hundreds of
+shards.
+
 ---
 
 ## 10. Scaling to AWS
@@ -462,9 +506,14 @@ See [AWS.md](AWS.md) for the full playbook. In brief:
    this safe: with `save_every_n_steps: 2000` and `resume: auto`, an interruption
    costs a few thousand steps at most.
 4. **Pack your data** — 4M small JPEGs on EBS will bottleneck you at ~40% GPU
-   utilisation. Use `.rec` on instance-store NVMe. Watch `perf/data_time_frac`.
+   utilisation. Use `.rec` packs or WebDataset shards on instance-store NVMe.
+   Watch `perf/data_time_frac`.
 5. **Enable `torch_compile: true`** on Linux — 20-30% on A10G/A100. It stays off
    on Windows automatically.
+6. **Multi-GPU is one command** —
+   `torchrun --nproc_per_node=4 -m scripts.train --config ...`. Streaming
+   datasets need `epoch_mode: resampled` so every rank runs the same number of
+   steps; `optim.lr` refers to the *total* batch across GPUs.
 
 ---
 
@@ -558,6 +607,36 @@ Model state is restored bit-identically, but DataLoader workers are reseeded per
 epoch, so augmentation order differs. This is expected. A *large* jump means the
 optimizer state failed to load — check the log for a warning.
 
+### I added shards (or a folder) and resumed -- what happens to the head?
+The trainer starts from the checkpoint's class map and *appends* any new
+identities, so existing head rows keep their meaning and new rows are added
+(random init) automatically -- the log says how many. For a better start for
+the new people, extend first with
+`python -m scripts.extend_classmap --checkpoint ... --config <new data> --output ... --init mean_embedding`
+and resume from that checkpoint. A `class map mismatch at index N` error means
+a checkpoint whose map was *rebuilt* rather than extended; use the script.
+
+### Training is slow and `perf/data_time_frac` is ~0
+The data pipeline is not the bottleneck; the model settings are. Run
+`python -m scripts.bench_backbone` -- on an RTX 3050 with torch 2.13,
+`model.backbone.channels_last: true` measured **6.7x slower** than off (27 vs
+181 img/s), which is why the configs ship with it off. Re-measure on each
+GPU/driver before enabling it.
+
+### `N of M shards are missing`
+`data.adapter.shards` names files the download script has not fetched yet.
+Narrow the brace range to what is present, or point `shards` at the directory
+so whatever has landed is used.
+
+### `persistent_workers is forced OFF for streaming datasets`
+Informational. Each epoch's shard order is derived from the epoch number, and
+workers only see it when they are (re)started. The restart costs a few
+seconds per epoch.
+
+### Streaming epoch has fewer steps than `len(loader)` (natural mode)
+With several workers each drops its own partial batch. Harmless; use
+`epoch_mode: resampled` if you need the count to be exact (DDP requires it).
+
 ---
 
 ## 13. Project layout
@@ -573,8 +652,11 @@ ESSI-FRS/
 │   │   └── heads.py            ArcFace / CosFace / AdaFace margin heads
 │   ├── data/
 │   │   ├── adapters/           one module per dataset format
+│   │   │   ├── streaming.py    the streaming contract + census cache
+│   │   │   └── webdataset.py   .tar/.tar.gz shards (Glint360K)
 │   │   ├── class_map.py        identity <-> index, append-only
-│   │   ├── dataset.py          torch Dataset + scan caching
+│   │   ├── dataset.py          map-style torch Dataset + scan caching
+│   │   ├── iterable_dataset.py streaming torch IterableDataset
 │   │   ├── transforms.py       resize policies and augmentation
 │   │   └── sampler.py          long-tail samplers
 │   ├── align/                  SCRFD detector + Umeyama warp
@@ -583,7 +665,7 @@ ESSI-FRS/
 │   │   ├── checkpoint.py       full-state save/load + head extension
 │   │   ├── optim.py            optimiser, param groups, LR schedules
 │   │   └── meters.py           metric accumulators
-│   ├── eval/                   LFW-protocol verification
+│   ├── eval/                   LFW-protocol verification (pair files + .bin packs)
 │   ├── report/                 HTML/Markdown report generation
 │   └── utils/                  logging, seeding, tensorboard
 ├── scripts/                    CLI entry points
@@ -621,6 +703,17 @@ python -m scripts.align_dataset --src raw_photos --dst aligned_112
 
 # Add new identities to a trained model
 python -m scripts.extend_classmap --checkpoint ... --config ... --dry-run
+
+# Glint360K (streaming): download -> census + hold-out -> train
+python scripts/download_glint360k.py --out D:/data/glint360k --shards 0-1
+python -m scripts.scan_webdataset --config configs/glint360k_ir50_adaface_local.yaml --holdout 100 --holdout-min-images 2
+python -m scripts.train --config configs/glint360k_ir50_adaface_local.yaml
+
+# Multi-GPU (Linux)
+torchrun --nproc_per_node=4 -m scripts.train --config configs/glint360k_ir100_adaface_aws.yaml
+
+# Raw GPU throughput of a backbone (pick channels_last / batch before a long run)
+python -m scripts.bench_backbone --arch ir_50 --batch 64
 
 # Tests
 pytest tests/ -q
