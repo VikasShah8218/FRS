@@ -56,7 +56,8 @@ model:
     embedding_size: 512
     pretrained: null              # path to a checkpoint to warm-start from
     freeze_backbone: false
-    channels_last: true           # ~10-15% on Ampere with AMP
+    channels_last: false          # NHWC. Was 6.7x SLOWER (27 vs 181 img/s) on RTX 3050 + torch 2.13 cu126.
+                                  # Benchmark with scripts/bench_backbone.py before turning on.
     gradient_checkpointing: false # trades ~30% speed for ~4x batch size
   head:
     type: adaface                 # arcface | cosface | adaface
