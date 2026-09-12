@@ -144,14 +144,17 @@ class PartialFC(nn.Module):
         # Temporarily view the head as if it had only the sampled classes. The
         # sliced weight keeps its graph connection, so gradient flows back into
         # exactly the sampled rows of the full parameter and no others.
-        full_weight = self.head.weight
+        #
+        # ``weight`` itself is an nn.Parameter and cannot be re-assigned with a
+        # plain tensor (PyTorch raises TypeError), so the head exposes a
+        # ``_weight_override`` slot that ``_cosine`` consults first.
         full_count = self.head.num_classes
         try:
-            self.head.weight = full_weight[selected]  # type: ignore[assignment]
+            self.head._weight_override = self.head.weight[selected]
             self.head.num_classes = selected.numel()
             logits = self.head(embeddings, norms, remapped)
         finally:
-            self.head.weight = full_weight  # type: ignore[assignment]
+            self.head._weight_override = None
             self.head.num_classes = full_count
 
         return logits, remapped
@@ -161,6 +164,17 @@ class PartialFC(nn.Module):
             f"sample_rate={self.sample_rate}, num_sampled={self.num_sampled}, "
             f"num_classes={self.num_classes}"
         )
+
+
+def unwrap_partial_fc(module: nn.Module) -> nn.Module:
+    """Return the bare margin head whether or not it is wrapped in Partial-FC.
+
+    Checkpoints store the *inner* head's state dict (keys ``weight``,
+    ``batch_mean`` ...) so a run can switch Partial-FC on or off between
+    resumes without renaming tensors.
+    """
+    module = getattr(module, "module", module)  # DDP
+    return module.head if isinstance(module, PartialFC) else module
 
 
 def maybe_wrap_partial_fc(
