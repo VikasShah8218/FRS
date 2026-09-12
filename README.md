@@ -6,12 +6,16 @@ A from-scratch face recognition training framework in PyTorch.
 - **Losses** — ArcFace, CosFace and AdaFace margin heads, switchable by config
 - **Alignment** — offline RetinaFace/SCRFD detection + similarity warp to the
   ArcFace canonical template
-- **Data** — pluggable adapters; a new dataset format is one file and one import
+- **Data** — pluggable adapters; a new dataset format is one file and one import.
+  Map-style (folders, `.rec` packs) or **streaming** (Glint360K WebDataset
+  shards: 17M images, 360k identities, never enumerated)
 - **Checkpoints** — fully resumable, and **extensible to new identities without
   retraining from scratch**
 - **Monitoring** — TensorBoard plus an automated HTML/Markdown accuracy report
+- **Evaluation** — held-out identity pairs, plus the standard InsightFace
+  `.bin` benchmarks (LFW, CFP-FP, AgeDB-30)
 
-Runs on a 4 GB laptop GPU and scales unchanged to multi-GPU AWS.
+Runs on a 4 GB laptop GPU and scales to multi-GPU AWS with `torchrun`.
 
 ---
 
@@ -37,6 +41,26 @@ tensorboard --logdir runs/
 ```
 
 The report lands at `runs/meglass_ir50_adaface/report/report.html`.
+
+### Glint360K (streaming, 17M images)
+
+```bash
+# 1. Download shards -- standalone script, run it in its own terminal.
+#    2 shards (~190 MB) prove the plumbing; --shards all is ~130 GB (AWS).
+python scripts/download_glint360k.py --out D:/data/glint360k --shards 0-1
+
+# 2. Census + held-out identities + verification pairs (run once)
+python -m scripts.scan_webdataset --config configs/glint360k_ir50_adaface_local.yaml \
+    --holdout 100 --holdout-min-images 2
+
+# 3. Prove the plumbing, then train
+python -m scripts.train --config configs/glint360k_ir50_adaface_local.yaml --overfit 64
+python -m scripts.train --config configs/glint360k_ir50_adaface_local.yaml
+```
+
+The images are already RetinaFace-aligned at 112x112: no detection or cropping
+happens in training. To scale up, change only `data.adapter.shards` (and use
+`configs/glint360k_ir100_adaface_aws.yaml` with `torchrun` on AWS).
 
 **→ Read [docs/GUIDE.md](docs/GUIDE.md) for the full walkthrough.**
 
@@ -74,7 +98,7 @@ frs/
   registry.py     name -> class registry (the plug-in mechanism)
   config.py       YAML inheritance, ${} interpolation, startup validation
   models/         IResNet backbones + ArcFace/CosFace/AdaFace heads
-  data/           adapters, class map, dataset, transforms, samplers
+  data/           adapters (map-style + streaming), class map, datasets, transforms, samplers
   align/          SCRFD detector + Umeyama similarity warp
   engine/         trainer, checkpointing, optimisers, meters
   eval/           LFW-protocol verification
@@ -110,6 +134,9 @@ python -m scripts.align_dataset --src raw_photos --dst aligned_112
 # Add new identities to an already-trained model
 python -m scripts.extend_classmap --checkpoint runs/<exp>/checkpoints/best.pt \
     --config configs/new_data.yaml --dry-run
+
+# Multi-GPU (Linux / AWS)
+torchrun --nproc_per_node=4 -m scripts.train --config configs/glint360k_ir100_adaface_aws.yaml
 
 pytest tests/ -q
 ```
