@@ -110,6 +110,7 @@ class FaceIterableDataset(IterableDataset):
         self.world_size = max(1, int(world_size))
         self.seed = int(seed)
         self.epoch = 0
+        self.salt = 0
 
         if adapter.epoch_mode == "natural" and self.world_size > 1:
             raise ValueError(
@@ -189,8 +190,15 @@ class FaceIterableDataset(IterableDataset):
 
     # ------------------------------------------------------------- epochs
 
-    def set_epoch(self, epoch: int) -> None:
+    def set_epoch(self, epoch: int, salt: int = 0) -> None:
+        """Select the epoch whose shard order and shuffle are streamed next.
+
+        ``salt`` perturbs the seed for a resumed partial epoch, so the remaining
+        batches draw fresh samples instead of replaying the ones trained on
+        before the interruption. ``salt=0`` reproduces the normal epoch order.
+        """
         self.epoch = int(epoch)
+        self.salt = int(salt)
 
     @property
     def samples_per_epoch(self) -> int:
@@ -225,9 +233,10 @@ class FaceIterableDataset(IterableDataset):
     def _raw_stream(
         self, worker: int, num_workers: int, epoch: int | None = None, shuffle: bool = True
     ) -> Iterator[tuple[bytes, int]]:
+        salt = getattr(self, "salt", 0)
         return self.adapter.iter_raw(
             epoch=self.epoch if epoch is None else epoch,
-            seed=self.seed,
+            seed=self.seed + 1_000_003 * salt if salt else self.seed,
             rank=self.rank,
             world_size=self.world_size,
             worker=worker,

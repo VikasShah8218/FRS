@@ -229,7 +229,11 @@ def run(args: argparse.Namespace, rank: int, world_size: int, local_rank: int) -
     barrier()
     setup_logging(output_dir, rank=rank)
 
-    seed_all(seed, bool(cfg.experiment.get("deterministic", False)))
+    seed_all(
+        seed,
+        bool(cfg.experiment.get("deterministic", False)),
+        tf32=bool(cfg.experiment.get("tf32", True)),
+    )
 
     if torch.cuda.is_available():
         device = torch.device("cuda", local_rank)
@@ -344,12 +348,19 @@ def run(args: argparse.Namespace, rank: int, world_size: int, local_rank: int) -
 
     # ---------------------------------------------------------------- optim
     optimizer = build_optimizer(cfg.optim, backbone, head)
+    # The scheduler advances once per *optimizer update*, which under gradient
+    # accumulation is once every grad_accum batches. Sizing it in batches would
+    # stretch warm-up by that factor and stop the decay short of zero.
+    grad_accum = max(1, int(cfg.train.get("grad_accum_steps", 1)))
     scheduler = build_scheduler(
-        cfg.scheduler, optimizer, steps_per_epoch=len(loader), epochs=int(cfg.train.epochs)
+        cfg.scheduler,
+        optimizer,
+        steps_per_epoch=max(1, len(loader) // grad_accum),
+        epochs=int(cfg.train.epochs),
     )
 
     # --------------------------------------------------------------- resume
-    start_epoch, global_step = 0, 0
+    start_epoch, global_step, start_step_in_epoch = 0, 0, 0
     history, best_metrics = [], {}
     if resume_path:
         state = load_checkpoint(
@@ -362,6 +373,7 @@ def run(args: argparse.Namespace, rank: int, world_size: int, local_rank: int) -
             map_location=str(device),
         )
         start_epoch, global_step = state.epoch, state.global_step
+        start_step_in_epoch = state.step_in_epoch
         history, best_metrics = state.history, state.best_metrics
 
     # ------------------------------------------------------- DDP / compile
@@ -375,8 +387,19 @@ def run(args: argparse.Namespace, rank: int, world_size: int, local_rank: int) -
                 "and gains little here). Enable it on Linux/AWS."
             )
         else:
-            backbone = torch.compile(backbone, mode="max-autotune")
-            logger.info("torch.compile enabled")
+            # NOT plain "max-autotune": that enables CUDA graphs, and CUDA graphs
+            # reuse one static output buffer per compiled region. This trainer
+            # deliberately consumes the backbone's outputs *outside* the compiled
+            # region -- the margin head runs in fp32 under autocast(False) -- so
+            # the next iteration overwrites (embedding, norm) before backward has
+            # read them:
+            #   RuntimeError: accessing tensor output of CUDAGraphs that has been
+            #   overwritten by a subsequent run
+            # The "-no-cudagraphs" variant keeps the kernel autotuning (which is
+            # where the speedup lives) and drops only the graph capture.
+            mode = str(cfg.train.get("compile_mode", "max-autotune-no-cudagraphs"))
+            backbone = torch.compile(backbone, mode=mode)
+            logger.info("torch.compile enabled (mode=%s)", mode)
 
     total_batch = int(cfg.data.batch_size) * world_size * int(cfg.train.get("grad_accum_steps", 1))
     log_config_banner(
@@ -410,6 +433,7 @@ def run(args: argparse.Namespace, rank: int, world_size: int, local_rank: int) -
         best_metrics=best_metrics,
         dataset_stats=stats,
         is_main=is_main,
+        start_step_in_epoch=start_step_in_epoch,
     )
     history_obj = trainer.train()
 

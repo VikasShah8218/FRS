@@ -11,6 +11,13 @@ experiment:
   # cudnn.benchmark picks the fastest conv algorithm per input shape (~15% here,
   # since our shape never varies). Turn deterministic on only to chase a bug.
   deterministic: false
+  # TensorFloat-32 matmuls on Ampere+. Worth having: the margin head runs in
+  # fp32 by design, and at a large class count its (B x C) matmul is a real
+  # share of each step (0.78 -> 0.46 ms measured on an A10G at 36k sampled
+  # classes). Both its operands are L2-normalised, so the measured error is
+  # 7e-05 -- finer than the fp16 the backbone already uses. Ignored when
+  # deterministic: true.
+  tf32: true
 
 data:
   adapter:
@@ -102,6 +109,11 @@ train:
   keep_last_n_checkpoints: 3
   resume: auto                    # auto | null | path/to/last.pt
   torch_compile: false            # auto-disabled on Windows regardless
+  # Do NOT use plain "max-autotune": it turns on CUDA graphs, whose static
+  # output buffers are overwritten before backward reads them (the margin head
+  # runs outside the compiled region, in fp32). Autotuning without graphs is
+  # where the speedup actually comes from.
+  compile_mode: max-autotune-no-cudagraphs
 
 eval:
   targets: []

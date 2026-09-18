@@ -16,12 +16,17 @@ Two things here are easy to get wrong and cost real accuracy:
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any, Iterable
 
 import torch
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
+
+from ..models.partial_fc import PartialFC
+
+logger = logging.getLogger(__name__)
 
 
 def build_param_groups(
@@ -30,9 +35,15 @@ def build_param_groups(
     no_wd_on_bn_and_bias: bool = True,
     head_lr_multiplier: float = 1.0,
     head_modules: Iterable[torch.nn.Module] = (),
+    exclude_from_wd: Iterable[torch.nn.Parameter] = (),
 ) -> list[dict[str, Any]]:
-    """Split parameters into decayed / non-decayed (and optionally head) groups."""
+    """Split parameters into decayed / non-decayed (and optionally head) groups.
+
+    ``exclude_from_wd`` names parameters whose weight decay is applied
+    elsewhere -- the Partial-FC classifier, which decays only its sampled rows.
+    """
     head_params = {id(p) for m in head_modules for p in m.parameters()}
+    excluded = {id(p) for p in exclude_from_wd}
 
     decay: list[torch.nn.Parameter] = []
     no_decay: list[torch.nn.Parameter] = []
@@ -44,7 +55,7 @@ def build_param_groups(
             if not param.requires_grad:
                 continue
             # ndim <= 1 catches BatchNorm weight/bias, all biases, and PReLU.
-            skip_wd = no_wd_on_bn_and_bias and param.ndim <= 1
+            skip_wd = (no_wd_on_bn_and_bias and param.ndim <= 1) or id(param) in excluded
             is_head = id(param) in head_params
             if is_head:
                 (head_no_decay if skip_wd else head_decay).append(param)
@@ -89,12 +100,27 @@ def build_optimizer(
     lr = float(optim_cfg["lr"])
     weight_decay = float(optim_cfg.get("weight_decay", 5e-4))
 
+    # Partial-FC trains a subset of classifier rows per step. Letting the
+    # optimizer decay the whole matrix shrinks every unsampled row, every step,
+    # until the rows collapse (see PartialFC.pop_decay_penalty). Hand the decay
+    # to the wrapper instead, which applies it to the sampled rows only.
+    exclude: list[torch.nn.Parameter] = []
+    inner_head = getattr(head, "module", head)
+    if isinstance(inner_head, PartialFC):
+        inner_head.weight_decay = weight_decay
+        exclude.append(inner_head.head.weight)
+        logger.info(
+            "Partial-FC: weight decay %.1e applied to sampled classifier rows only",
+            weight_decay,
+        )
+
     groups = build_param_groups(
         modules=[backbone, head],
         weight_decay=weight_decay,
         no_wd_on_bn_and_bias=bool(optim_cfg.get("no_wd_on_bn_and_bias", True)),
         head_lr_multiplier=float(optim_cfg.get("head_lr_multiplier", 1.0)),
         head_modules=[head],
+        exclude_from_wd=exclude,
     )
     for g in groups:
         g["lr"] = lr * g.get("lr_scale", 1.0)

@@ -550,9 +550,22 @@ between batch 64 working and OOM at step 400.
 
 ### Scaling the LR
 
-**Linear rule: LR scales with total batch size.** The ArcFace reference is 0.1 at
-batch 256. Doubling the batch doubles the LR; warmup becomes more important as
-batch grows (2 epochs at batch ≥512).
+**Linear rule: LR scales with total batch size.** The reference for large
+datasets is InsightFace's Glint360K / MS1MV3 recipe: **0.1 at a total batch of
+1,024** (128 per GPU x 8 GPUs). Doubling the batch doubles the LR; warmup
+becomes more important as batch grows (2 epochs at batch ≥512).
+
+| Total batch | LR |
+|---:|---:|
+| 192 (1x A10G) | 0.02 |
+| 512 (4x A10G) | 0.05 |
+| 1,024 (8 GPUs) | 0.1 |
+
+**Measured, not theoretical:** the first ESSI-FR v1 run used 0.075 at batch
+192 — roughly 4x this rule. Training loss stopped improving once warm-up
+passed ~0.026, and validation accuracy fell from 97.2% after epoch 0 to 91.8%
+after epoch 1. Small datasets with a full classifier (MeGlass) tolerate more;
+hundreds of thousands of classes with Partial-FC do not.
 
 ### How many epochs, really
 
@@ -615,6 +628,33 @@ the new people, extend first with
 `python -m scripts.extend_classmap --checkpoint ... --config <new data> --output ... --init mean_embedding`
 and resume from that checkpoint. A `class map mismatch at index N` error means
 a checkpoint whose map was *rebuilt* rather than extended; use the script.
+
+### Loss rises during warm-up, or `Classifier rows have collapsed`
+Every training log line carries `wnorm`, the median L2 norm of the classifier
+rows. The margin head normalises its rows, so a row's effective step size grows
+as `1 / wnorm²`: a steadily falling `wnorm` means the head is taking ever larger
+steps and the run is about to degrade. It should settle, not keep falling.
+
+The first Glint360K run showed exactly this: `wnorm` fell from 0.226 to 0.0076
+over two epochs, the loss rose from 14.9 to 32, and validation accuracy fell
+from 97.2% to 91.8%. Two causes, both fixed:
+
+- **Weight decay on unsampled Partial-FC rows.** The optimizer decayed all
+  359,232 rows every step while only ~10% received gradient. Partial-FC now
+  applies the decay to the rows it samples; `tests/test_partial_fc.py`
+  reproduces the collapse against the old behaviour.
+- **Learning rate ~4x too high** for the batch size. See "Scaling the LR".
+
+If the warning appears, lower `optim.lr` first.
+
+### `accessing tensor output of CUDAGraphs that has been overwritten`
+Raised from `backward()` a few steps into a run with `torch_compile: true`.
+CUDA graphs give each compiled region one static output buffer, but this
+trainer consumes the backbone's `(embedding, norm)` *outside* the compiled
+region (the margin head must run in fp32), so the next iteration overwrites
+them before backward reads them. Keep `train.compile_mode:
+max-autotune-no-cudagraphs`, which is the default — it retains the kernel
+autotuning and drops only the graph capture.
 
 ### Training is slow and `perf/data_time_frac` is ~0
 The data pipeline is not the bottleneck; the model settings are. Run

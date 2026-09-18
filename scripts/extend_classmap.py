@@ -242,6 +242,7 @@ def main() -> int:
     ckpt["class_map"] = extended.to_dict()
     # Fine-tuning restarts the epoch counter; the history is kept for provenance.
     ckpt["epoch"] = 0
+    ckpt["step_in_epoch"] = 0
     ckpt["global_step"] = 0
     ckpt.pop("rng", None)
     ckpt.pop("scheduler", None)

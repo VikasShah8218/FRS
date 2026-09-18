@@ -14,7 +14,8 @@
 #   Multi-GPU  : torchrun --nproc_per_node=4 -m scripts.train --config configs/essi_fr_v1_aws.yaml
 #
 # Sized for 4x A10G (24 GB each). LR scales linearly with the TOTAL batch
-# (batch_size x GPUs x grad_accum): 128 x 4 = 512 -> 0.2.
+# (batch_size x GPUs x grad_accum) from InsightFace's reference of 0.1 at 1,024:
+# 128 x 4 = 512 -> 0.05. Single GPU: configs/essi_fr_v1_aws_1gpu.yaml.
 #
 # The deployable artifact is runs/essi_fr_v1/checkpoints/backbone_only.pt --
 # weights only, no classifier, no identity list. See scripts/export.py.
@@ -67,7 +68,7 @@ model:
 
 optim:
   type: sgd
-  lr: 0.2                          # linear rule from the ArcFace ref (0.1 @ 256)
+  lr: 0.05                         # 0.1 x (512 / 1024); see docs/GUIDE.md "Scaling the LR"
   momentum: 0.9
   weight_decay: 5.0e-4
   no_wd_on_bn_and_bias: true
