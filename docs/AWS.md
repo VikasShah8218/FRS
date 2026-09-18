@@ -139,7 +139,7 @@ model:
     type: adaface
     partial_fc: {enabled: auto, sample_rate: 0.1}   # on: 360k > 300k classes
 
-optim: {type: sgd, lr: 0.2, momentum: 0.9, weight_decay: 5.0e-4}   # 0.1 x (512/256)
+optim: {type: sgd, lr: 0.05, momentum: 0.9, weight_decay: 5.0e-4}  # 0.1 x (512/1024)
 scheduler: {type: polylr, warmup_epochs: 2, power: 2.0}
 
 train:
@@ -181,7 +181,7 @@ environment (`frs/utils/distributed.py`), wraps backbone and head in
 for map-style datasets; the shard stream itself for streaming ones) and lets
 rank 0 do all logging, checkpointing and evaluation. Things to know:
 
-- **LR scales with the *total* batch.** 4 GPUs × 128 = 512, so LR 0.2. The
+- **LR scales with the *total* batch.** The reference is 0.1 at 1,024; 4 GPUs × 128 = 512, so LR 0.05. The
   start-up banner prints the total batch.
 - **Streaming needs `epoch_mode: resampled`.** Every rank and worker then yields
   exactly the same number of batches, which DDP needs to not deadlock.
@@ -197,9 +197,59 @@ rank 0 do all logging, checkpointing and evaluation. Things to know:
 ### Keeping it alive across SSH drops
 ```bash
 tmux new -s train
-python -m scripts.train --config configs/aws_ir100_adaface.yaml
+python -m scripts.train --config configs/essi_fr_v1_aws_1gpu.yaml
 # Ctrl-B then D to detach; `tmux attach -t train` to return
 ```
+
+### Surviving instance stops
+
+tmux survives a dropped SSH connection, not a stopped instance. On 12 September
+2026 the first ESSI-FR run was stopped from outside the machine at 20:00:33 UTC:
+the system log shows `Power key pressed short`, which is what an EC2 Stop call
+sends. Three layers make that a non-event:
+
+1. **Stop protection** (console: Actions, Instance settings, Change stop
+   protection). Blocks Stop calls from the console, scripts and automation. It
+   cannot block AWS hardware retirement.
+2. **Auto-resume on boot.** Install the systemd unit, the needrestart
+   exclusion and the logind setting once:
+   ```bash
+   sudo cp ~/FRS/scripts/aws/essi-train.service /etc/systemd/system/
+   sudo cp ~/FRS/scripts/aws/needrestart-essi-train.conf /etc/needrestart/conf.d/essi-train.conf
+   sudo mkdir -p /etc/systemd/logind.conf.d
+   sudo cp ~/FRS/scripts/aws/logind-essi-train.conf /etc/systemd/logind.conf.d/essi-train.conf
+   sudo loginctl enable-linger ubuntu
+   sudo systemctl restart systemd-logind
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now essi-train
+   ```
+   Every boot then runs `scripts/aws/start_training.sh`, which resumes from
+   `last.pt` in a tmux session named `train`. Disable with
+   `sudo systemctl disable essi-train` or `touch ~/FRS/NO_AUTORESUME`.
+
+   **Do not skip the needrestart or logind files.** Both failures happened on
+   13 September 2026, within 40 minutes of each other:
+   - Ubuntu's unattended-upgrades patched libraries and `needrestart` restarted
+     the training service three times in 75 seconds, killing training each
+     time. The exclusion stops that; the unit's `KillMode=process` guarantees
+     any restart leaves training running.
+   - When the last SSH session closed, logind's default `RemoveIPC=yes` deleted
+     the `ubuntu` user's shared memory, and PyTorch's DataLoader workers
+     crashed two seconds later (`could not unlink the shared memory file`).
+     `RemoveIPC=no` plus lingering stops that.
+
+   Training started by hand inside an SSH tmux session is not affected by the
+   second failure, because the session keeps the user logged in.
+3. **Mid-epoch checkpoints that resume mid-epoch.** `save_every_n_steps` writes
+   the position inside the epoch, so a resume trains only the batches not yet
+   reached. At 2,000 steps and ~0.25 s/step a stop costs about 8 minutes.
+
+To find out *who* stopped an instance: CloudTrail, Event history, filter Event
+name `StopInstances`. It names the user, role or AWS service.
+
+Data and checkpoints on the root EBS volume survive a stop. Anything on the
+instance-store NVMe (`/opt/dlami/nvme` on the Deep Learning AMI) does not.
+**Terminate** deletes the root volume too.
 
 ---
 

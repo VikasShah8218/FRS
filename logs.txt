@@ -1,0 +1,76 @@
+
+14:04:58 | INFO    | frs.engine.trainer     | ep 16 [88182/88698] loss 1.0139  acc 79.43%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:05:10 | INFO    | frs.engine.trainer     | ep 16 [88232/88698] loss 1.0244  acc 79.25%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:05:22 | INFO    | frs.engine.trainer     | ep 16 [88282/88698] loss 1.0102  acc 78.76%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:05:34 | INFO    | frs.engine.trainer     | ep 16 [88332/88698] loss 1.0101  acc 79.41%  lr 0.00050  fnorm 22.6  wnorm 0.2570  788 img/s
+14:05:46 | INFO    | frs.engine.trainer     | ep 16 [88382/88698] loss 0.9771  acc 80.15%  lr 0.00050  fnorm 22.6  wnorm 0.2570  788 img/s
+14:05:59 | INFO    | frs.engine.trainer     | ep 16 [88432/88698] loss 0.9997  acc 79.66%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:06:11 | INFO    | frs.engine.trainer     | ep 16 [88482/88698] loss 1.0164  acc 79.19%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:06:23 | INFO    | frs.engine.trainer     | ep 16 [88532/88698] loss 1.0117  acc 79.33%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:06:35 | INFO    | frs.engine.trainer     | ep 16 [88582/88698] loss 0.9977  acc 79.61%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:06:47 | INFO    | frs.engine.trainer     | ep 16 [88632/88698] loss 1.0176  acc 78.84%  lr 0.00050  fnorm 22.6  wnorm 0.2570  788 img/s
+14:06:59 | INFO    | frs.engine.trainer     | ep 16 [88682/88698] loss 1.0158  acc 79.05%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:07:03 | INFO    | frs.engine.trainer     | epoch 16 done: loss 1.0974  acc 77.81%  363.5 min  789 img/s  data-stall 0.1%
+14:07:22 | INFO    | frs.engine.trainer     |
+benchmark            accuracy      std   thresh     AUC   TAR@1e-3
+------------------------------------------------------------------
+glint_val             99.950%   0.076   0.2422  0.9998     99.97%
+14:07:27 | INFO    | frs.engine.checkpoint  | Saved checkpoint: runs/essi_fr_v1/checkpoints/last.pt (epoch 17, step 1507866)
+14:07:37 | INFO    | frs.engine.trainer     | ep 17 [  34/88698] loss 0.9933  acc 79.96%  lr 0.00050  fnorm 22.6  wnorm 0.2570  640 img/s
+14:07:49 | INFO    | frs.engine.trainer     | ep 17 [  84/88698] loss 1.0068  acc 79.81%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:08:02 | INFO    | frs.engine.trainer     | ep 17 [ 134/88698] loss 1.0021  acc 79.93%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:08:06 | INFO    | frs.engine.checkpoint  | Saved checkpoint: runs/essi_fr_v1/checkpoints/last.pt (epoch 17, step 1508000)
+14:08:19 | INFO    | frs.engine.trainer     | ep 17 [ 184/88698] loss 0.9749  acc 79.73%  lr 0.00050  fnorm 22.6  wnorm 0.2570  561 img/s
+14:08:31 | INFO    | frs.engine.trainer     | ep 17 [ 234/88698] loss 0.9991  acc 79.52%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:08:43 | INFO    | frs.engine.trainer     | ep 17 [ 284/88698] loss 0.9712  acc 79.79%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:08:55 | INFO    | frs.engine.trainer     | ep 17 [ 334/88698] loss 0.9546  acc 80.01%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:09:07 | INFO    | frs.engine.trainer     | ep 17 [ 384/88698] loss 0.9835  acc 79.49%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:09:20 | INFO    | frs.engine.trainer     | ep 17 [ 434/88698] loss 1.0103  acc 79.58%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:09:32 | INFO    | frs.engine.trainer     | ep 17 [ 484/88698] loss 1.0134  acc 79.65%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:09:44 | INFO    | frs.engine.trainer     | ep 17 [ 534/88698] loss 0.9879  acc 79.67%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:09:56 | INFO    | frs.engine.trainer     | ep 17 [ 584/88698] loss 0.9723  acc 79.88%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:10:08 | INFO    | frs.engine.trainer     | ep 17 [ 634/88698] loss 0.9923  acc 79.94%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:10:20 | INFO    | frs.engine.trainer     | ep 17 [ 684/88698] loss 1.0080  acc 78.91%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:10:33 | INFO    | frs.engine.trainer     | ep 17 [ 734/88698] loss 0.9896  acc 79.70%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:10:45 | INFO    | frs.engine.trainer     | ep 17 [ 784/88698] loss 1.0141  acc 79.28%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:10:57 | INFO    | frs.engine.trainer     | ep 17 [ 834/88698] loss 1.0877  acc 77.84%  lr 0.00050  fnorm 22.6  wnorm 0.2570  788 img/s
+14:11:09 | INFO    | frs.engine.trainer     | ep 17 [ 884/88698] loss 1.0955  acc 77.78%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:11:21 | INFO    | frs.engine.trainer     | ep 17 [ 934/88698] loss 1.0785  acc 78.67%  lr 0.00050  fnorm 22.6  wnorm 0.2570  789 img/s
+14:11:33 | INFO    | frs.engine.trainer     | ep 17 [ 984/88698] loss 1.0904  acc 77.98%  lr 0.00049  fnorm 22.6  wnorm 0.2570  789 img/s
+14:11:46 | INFO    | frs.engine.trainer     | ep 17 [1034/88698] loss 1.0591  acc 78.43%  lr 0.00049  fnorm 22.6  wnorm 0.2570  789 img/s
+14:11:58 | INFO    | frs.engine.trainer     | ep 17 [1084/88698] loss 1.1211  acc 77.79%  lr 0.
+
+
+16:29:53 | INFO    | frs.engine.trainer     | ep 17 [34734/88698] loss 0.9529  acc 80.55%  lr 0.00038  fnorm 22.6  wnorm 0.2567  789 img/s
+16:30:06 | INFO    | frs.engine.trainer     | ep 17 [34784/88698] loss 0.9387  acc 80.34%  lr 0.00038  fnorm 22.6  wnorm 0.2567  789 img/s
+16:30:18 | INFO    | frs.engine.trainer     | ep 17 [34834/88698] loss 0.9150  acc 80.76%  lr 0.00038  fnorm 22.6  wnorm 0.2567  789 img/s
+16:30:30 | INFO    | frs.engine.trainer     | ep 17 [34884/88698] loss 0.9043  acc 80.84%  lr 0.00038  fnorm 22.6  wnorm 0.2567  789 img/s
+16:30:42 | INFO    | frs.engine.trainer     | ep 17 [34934/88698] loss 0.8729  acc 81.95%  lr 0.00038  fnorm 22.6  wnorm 0.2567  789 img/s
+16:30:54 | INFO    | frs.engine.trainer     | ep 17 [34984/88698] loss 0.9348  acc 80.50%  lr 0.00038  fnorm 22.6  wnorm 0.2567  789 img/s
+16:31:06 | INFO    | frs.engine.trainer     | ep 17 [35034/88698] loss 0.9169  acc 80.39%  lr 0.00038  fnorm 22.6  wnorm 0.2567  789 img/s
+16:31:19 | INFO    | frs.engine.trainer     | ep 17 [35084/88698] loss 0.9296  acc 80.92%  lr 0.00038  fnorm 22.6  wnorm 0.2567  789 img/s
+16:31:31 | INFO    | frs.engine.trainer     | ep 17 [35134/88698] loss 0.9115  acc 81.08%  lr 0.00038  fnorm 22.6  wnorm 0.2567  789 img/s
+16:31:43 | INFO    | frs.engine.trainer     | ep 17 [35184/88698] loss 0.9260  acc 80.46%  lr 0.00038  fnorm 22.6  wnorm 0.2567  789 img/s
+16:31:55 | INFO    | frs.engine.trainer     | ep 17 [35234/88698] loss 0.9669  acc 80.16%  lr 0.00038  fnorm 22.6  wnorm 0.2567  789 img/s
+16:32:07 | INFO    | frs.engine.trainer     | ep 17 [35284/88698] loss 0.9337  acc 80.59%  lr 0.00038  fnorm 22.6  wnorm 0.2567  789 img/s
+16:32:19 | INFO    | frs.engine.trainer     | ep 17 [35334/88698] loss 1.0013  acc 79.72%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:32:32 | INFO    | frs.engine.trainer     | ep 17 [35384/88698] loss 0.9864  acc 79.72%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:32:44 | INFO    | frs.engine.trainer     | ep 17 [35434/88698] loss 1.0151  acc 79.46%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:32:56 | INFO    | frs.engine.trainer     | ep 17 [35484/88698] loss 0.9887  acc 79.81%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:33:08 | INFO    | frs.engine.trainer     | ep 17 [35534/88698] loss 0.9807  acc 80.09%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:33:20 | INFO    | frs.engine.trainer     | ep 17 [35584/88698] loss 1.0115  acc 79.16%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:33:32 | INFO    | frs.engine.trainer     | ep 17 [35634/88698] loss 1.0619  acc 78.51%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:33:45 | INFO    | frs.engine.trainer     | ep 17 [35684/88698] loss 1.0280  acc 78.77%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:33:57 | INFO    | frs.engine.trainer     | ep 17 [35734/88698] loss 1.0449  acc 79.39%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:34:09 | INFO    | frs.engine.trainer     | ep 17 [35784/88698] loss 1.0857  acc 78.46%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:34:21 | INFO    | frs.engine.trainer     | ep 17 [35834/88698] loss 1.0344  acc 79.35%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:34:33 | INFO    | frs.engine.trainer     | ep 17 [35884/88698] loss 1.0102  acc 79.26%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:34:45 | INFO    | frs.engine.trainer     | ep 17 [35934/88698] loss 1.0018  acc 79.82%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:34:58 | INFO    | frs.engine.trainer     | ep 17 [35984/88698] loss 1.0042  acc 79.66%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:35:10 | INFO    | frs.engine.trainer     | ep 17 [36034/88698] loss 1.0063  acc 79.64%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:35:22 | INFO    | frs.engine.trainer     | ep 17 [36084/88698] loss 1.0193  acc 79.38%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:35:34 | INFO    | frs.engine.trainer     | ep 17 [36134/88698] loss 1.0454  acc 78.61%  lr 0.00037  fnorm 22.6  wnorm 0.2567  788 img/s
+16:35:39 | INFO    | frs.engine.checkpoint  | Saved checkpoint: runs/essi_fr_v1/checkpoints/last.pt (epoch 17, step 1544000)
+16:35:51 | INFO    | frs.engine.trainer     | ep 17 [36184/88698] loss 1.0242  acc 78.93%  lr 0.00037  fnorm 22.6  wnorm 0.2567  557 img/s
+16:36:04 | INFO    | frs.engine.trainer     | ep 17 [36234/88698] loss 1.0214  acc 79.38%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s
+16:36:16 | INFO    | frs.engine.trainer     | ep 17 [36284/88698] loss 1.0421  acc 78.66%  lr 0.00037  fnorm 22.6  wnorm 0.2567  789 img/s

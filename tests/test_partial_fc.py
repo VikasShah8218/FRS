@@ -143,3 +143,138 @@ def test_extension_on_wrapped_head():
     emb, norms, labels = _batch()
     logits, remapped = head(emb, norms, labels)
     assert logits.shape[0] == BATCH
+
+
+# ------------------------------------------------ weight decay (row collapse)
+
+
+def _pfc_with_optimizer(num_classes=CLASSES, sample_rate=0.1, lr=0.5, wd=1e-2, momentum=0.0):
+    """Partial-FC head + backbone + the project's own optimizer builder."""
+    from frs.config import Config
+    from frs.engine.optim import build_optimizer
+
+    torch.manual_seed(0)
+    backbone = TinyBackbone()
+    head = PartialFC(ArcFaceHead(DIM, num_classes), sample_rate=sample_rate)
+    cfg = Config._wrap({"type": "sgd", "lr": lr, "momentum": momentum, "weight_decay": wd})
+    return backbone, head, build_optimizer(cfg, backbone, head)
+
+
+def _step(backbone, head, optimizer, labels):
+    emb, norms = backbone(torch.randn(labels.numel(), DIM))
+    logits, remapped = head(emb, norms, labels)
+    loss = torch.nn.functional.cross_entropy(logits, remapped)
+    penalty = head.pop_decay_penalty()
+    (loss + penalty if penalty is not None else loss).backward()
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+
+
+def test_optimizer_hands_classifier_decay_to_partial_fc():
+    _, head, optimizer = _pfc_with_optimizer(wd=5e-4)
+    group = next(g for g in optimizer.param_groups if any(p is head.head.weight for p in g["params"]))
+    assert group["weight_decay"] == 0.0, "optimizer must not decay the full classifier"
+    assert head.weight_decay == 5e-4, "Partial-FC must apply the decay itself"
+
+
+def test_full_classifier_keeps_optimizer_decay():
+    from frs.config import Config
+    from frs.engine.optim import build_optimizer
+
+    backbone, head = TinyBackbone(), ArcFaceHead(DIM, CLASSES)
+    opt = build_optimizer(Config._wrap({"type": "sgd", "lr": 0.1, "weight_decay": 5e-4}), backbone, head)
+    group = next(g for g in opt.param_groups if any(p is head.weight for p in g["params"]))
+    assert group["weight_decay"] == 5e-4
+
+
+def test_one_step_leaves_unsampled_rows_exactly_unchanged():
+    backbone, head, optimizer = _pfc_with_optimizer(momentum=0.0)
+    before = head.head.weight.detach().clone()
+    _step(backbone, head, optimizer, torch.randint(0, CLASSES, (BATCH,)))
+
+    selected = set(head.last_selected.tolist())
+    unsampled = [i for i in range(CLASSES) if i not in selected]
+    assert unsampled, "test needs some unsampled rows"
+    torch.testing.assert_close(head.head.weight.detach()[unsampled], before[unsampled], rtol=0, atol=0)
+    changed = (head.head.weight.detach() - before).abs().sum(1) > 0
+    assert changed[sorted(selected)].all(), "every sampled row should move"
+
+
+def test_sampled_rows_receive_coupled_weight_decay():
+    """Gradient of the penalty on a sampled row is exactly wd * w, as SGD's own decay."""
+    _, head, _ = _pfc_with_optimizer(wd=0.03)
+    emb = torch.nn.functional.normalize(torch.randn(BATCH, DIM), dim=1)
+    head(emb, None, torch.randint(0, CLASSES, (BATCH,)))
+    penalty = head.pop_decay_penalty()
+    penalty.backward()
+    rows = head.last_selected
+    torch.testing.assert_close(head.head.weight.grad[rows], 0.03 * head.head.weight.detach()[rows])
+    others = torch.ones(CLASSES, dtype=torch.bool)
+    others[rows] = False
+    assert head.head.weight.grad[others].abs().sum() == 0
+    assert head.pop_decay_penalty() is None, "penalty must be consumed once"
+
+
+def test_no_penalty_in_eval_mode_or_without_decay():
+    _, head, _ = _pfc_with_optimizer(wd=0.0)
+    emb = torch.randn(BATCH, DIM)
+    head(emb, None, torch.randint(0, CLASSES, (BATCH,)))
+    assert head.pop_decay_penalty() is None
+    head.weight_decay = 1e-3
+    head.eval()
+    head(emb, None, torch.randint(0, CLASSES, (BATCH,)))
+    assert head.pop_decay_penalty() is None
+
+
+def test_classifier_rows_do_not_collapse_over_training():
+    """Regression for the Glint360K failure: median row norm fell 30x in two epochs.
+
+    The regime has to match the real one. On Glint360K a row that is not a
+    positive gets a softmax probability of ~1/36k, so almost no gradient, and
+    weight decay dominates its norm. (A toy with a few classes and tiny rows is
+    the opposite regime -- gradient growth dominates -- and would not show the
+    bug.) So: unit-norm rows, thousands of classes, a small sample rate, and
+    labels confined to a few classes.
+
+    The same loop runs twice: once with the old behaviour (optimizer decays the
+    whole matrix every step) and once through build_optimizer. The fix must keep
+    the median row near its starting norm while the old path collapses it.
+    """
+    from frs.config import Config
+    from frs.engine.optim import build_optimizer
+
+    dim, classes, rate, batch, steps = 128, 5000, 0.02, 8, 200
+    lr, wd, momentum = 0.1, 5e-2, 0.9
+
+    def median_norm_after(old_behaviour: bool) -> tuple[float, float]:
+        torch.manual_seed(0)
+        inner = ArcFaceHead(dim, classes)
+        with torch.no_grad():
+            inner.weight.normal_(std=dim ** -0.5)  # rows start at norm ~1
+        head = PartialFC(inner, sample_rate=rate)
+        unused_backbone = torch.nn.Linear(dim, dim)
+        if old_behaviour:
+            optimizer = torch.optim.SGD(head.parameters(), lr=lr, momentum=momentum, weight_decay=wd)
+        else:
+            cfg = Config._wrap({"type": "sgd", "lr": lr, "momentum": momentum, "weight_decay": wd})
+            optimizer = build_optimizer(cfg, unused_backbone, head)
+        start = float(inner.weight.detach().norm(dim=1).median())
+
+        torch.manual_seed(1)
+        for _ in range(steps):
+            emb = torch.nn.functional.normalize(torch.randn(batch, dim), dim=1)
+            labels = torch.randint(0, 10, (batch,))  # positives stay within 10 classes
+            logits, remapped = head(emb, None, labels)
+            loss = torch.nn.functional.cross_entropy(logits, remapped)
+            penalty = head.pop_decay_penalty()
+            (loss + penalty if penalty is not None else loss).backward()
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+        return start, float(inner.weight.detach().norm(dim=1).median())
+
+    start, old_median = median_norm_after(old_behaviour=True)
+    _, new_median = median_norm_after(old_behaviour=False)
+    assert old_median < 0.1 * start, (
+        f"sanity: the old behaviour should collapse rows ({start:.3f} -> {old_median:.3f})"
+    )
+    assert new_median > 0.6 * start, f"rows collapsed: {start:.3f} -> {new_median:.3f}"

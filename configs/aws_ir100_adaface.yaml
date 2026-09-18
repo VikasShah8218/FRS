@@ -46,7 +46,7 @@ model:
 
 optim:
   type: sgd
-  lr: 0.2                          # linear rule from the ArcFace ref (0.1 @ 256)
+  lr: 0.05                         # 0.1 x (512 / 1024); see docs/GUIDE.md "Scaling the LR"
   momentum: 0.9
   weight_decay: 5.0e-4
   no_wd_on_bn_and_bias: true

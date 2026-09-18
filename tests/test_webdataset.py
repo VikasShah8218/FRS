@@ -297,3 +297,18 @@ def test_scan_script_census_and_holdout(shards, tmp_path, monkeypatch):
     # refuses to overwrite the protocol silently
     monkeypatch.setattr(sys, "argv", sys.argv)
     assert scan_webdataset.main() == 1
+
+
+def test_resume_salt_draws_a_different_stream(shards):
+    """A resumed partial epoch must not replay the batches already trained on."""
+    adapter = WebDatasetAdapter(
+        shards=shards, epoch_mode="resampled", samples_per_epoch=40, shuffle_buffer=8
+    )
+    ds = FaceIterableDataset(adapter, transform=_identity_transform, cache_dir=None, batch_size=4, num_workers=1)
+    ds.set_epoch(3)
+    plain = [y for _, y in ds]
+    ds.set_epoch(3, salt=0)
+    assert [y for _, y in ds] == plain, "salt=0 must reproduce the normal epoch"
+    ds.set_epoch(3, salt=7)
+    salted = [y for _, y in ds]
+    assert salted != plain and len(salted) == len(plain)

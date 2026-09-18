@@ -110,6 +110,8 @@ class ResumeState:
     """What a resume recovered."""
 
     epoch: int = 0
+    #: Batches of ``epoch`` already trained; 0 means ``epoch`` starts fresh.
+    step_in_epoch: int = 0
     global_step: int = 0
     best_metrics: dict[str, float] = field(default_factory=dict)
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -129,6 +131,7 @@ def save_checkpoint(
     class_map: ClassMap | None = None,
     epoch: int = 0,
     global_step: int = 0,
+    step_in_epoch: int = 0,
     config: dict | None = None,
     metrics: dict | None = None,
     history: list[dict] | None = None,
@@ -154,6 +157,9 @@ def save_checkpoint(
         "format_version": CHECKPOINT_FORMAT_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "epoch": int(epoch),
+        # Batches of `epoch` already trained. Zero at epoch boundaries; non-zero
+        # for mid-epoch saves, so a resume continues inside the epoch.
+        "step_in_epoch": int(step_in_epoch),
         "global_step": int(global_step),
         "backbone": {
             "arch": getattr(backbone_inner, "arch", "unknown"),
@@ -283,6 +289,7 @@ def load_checkpoint(
 
     state = ResumeState(
         epoch=int(ckpt.get("epoch", 0)),
+        step_in_epoch=int(ckpt.get("step_in_epoch", 0) or 0),
         global_step=int(ckpt.get("global_step", 0)),
         best_metrics=dict(ckpt.get("metrics", {}) or {}),
         history=list(ckpt.get("history", []) or []),
@@ -370,9 +377,10 @@ def load_checkpoint(
         restore_rng_state(ckpt["rng"])
 
     logger.info(
-        "Resumed from %s at epoch %d, step %d%s",
+        "Resumed from %s at epoch %d (batch %d), global step %d%s",
         path,
         state.epoch,
+        state.step_in_epoch,
         state.global_step,
         " (head extended)" if state.extended else "",
     )
@@ -580,6 +588,7 @@ def inspect_checkpoint(path: str | os.PathLike) -> dict[str, Any]:
         "format_version": ckpt.get("format_version"),
         "created_at": ckpt.get("created_at"),
         "epoch": ckpt.get("epoch"),
+        "step_in_epoch": ckpt.get("step_in_epoch", 0),
         "global_step": ckpt.get("global_step"),
         "backbone_arch": ckpt.get("backbone", {}).get("arch"),
         "head_type": ckpt.get("head", {}).get("type"),
