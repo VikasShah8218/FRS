@@ -1,0 +1,8 @@
+ESSI-FR v1
+Library:           libfrvt_11_essi_000.so
+Recognition model: essi_fr_v1_last.onnx
+Model SHA256:      6872693382e27a98933163021e46076cc7c2f22d4ccbf7b97b9ff6d5c92e1646
+Face detector:     face_detection_yunet_2023mar.onnx (YuNet, OpenCV Zoo, MIT licence)
+Detector SHA256:   8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
+Inference runtime: ONNX Runtime 1.20.1, CPU, single-threaded
+Build date:        2026-09-19
