@@ -19,7 +19,9 @@ from torch.utils.data import Dataset
 
 from ..registry import ADAPTERS
 from .adapters.base import DatasetAdapter, Sample
+from .adapters.streaming import StreamingAdapter
 from .class_map import ClassMap
+from .iterable_dataset import FaceIterableDataset, InMemoryDataset  # noqa: F401  re-export
 from .transforms import FaceTransform
 
 logger = logging.getLogger(__name__)
@@ -128,10 +130,32 @@ class FaceTrainDataset(Dataset):
     def num_classes(self) -> int:
         return self.class_map.num_classes
 
+    @property
+    def identities(self) -> list[str]:
+        """Sorted identity strings present in this dataset."""
+        return sorted({s.identity for s in self.samples})
+
+    def reindex(self, class_map: ClassMap, strict: bool = True) -> None:
+        """Recompute ``targets`` against a (typically extended) class map."""
+        if not strict:
+            self.samples = [s for s in self.samples if s.identity in class_map]
+        self.class_map = class_map
+        self.targets = np.fromiter(
+            (class_map.index_of(s.identity) for s in self.samples),
+            dtype=np.int64,
+            count=len(self.samples),
+        )
+
     def summary(self) -> dict[str, Any]:
         stats = DatasetAdapter.summarize(self.samples)
         stats.pop("identity_counts", None)
         stats["num_classes"] = self.num_classes
+        return stats
+
+    def report_stats(self) -> dict[str, Any]:
+        """``summary()`` plus the per-identity histogram data for the report."""
+        stats = self.summary()
+        stats["identity_counts"] = self.identity_counts().tolist()
         return stats
 
     def identity_counts(self) -> np.ndarray:
@@ -150,9 +174,32 @@ def build_dataset(
     transform: FaceTransform | None = None,
     class_map: ClassMap | None = None,
     strict_labels: bool = True,
-) -> FaceTrainDataset:
-    """Build adapter + dataset from the ``data`` block of a config."""
+    *,
+    rank: int = 0,
+    world_size: int = 1,
+    seed: int = 0,
+) -> "FaceTrainDataset | FaceIterableDataset":
+    """Build adapter + dataset from the ``data`` block of a config.
+
+    Map-style adapters (folders, ``.rec`` packs) give a
+    :class:`FaceTrainDataset`; streaming adapters (WebDataset shards) give a
+    :class:`FaceIterableDataset`. Both yield ``(image_tensor, class_index)``.
+    """
     adapter = ADAPTERS.build(dict(data_cfg["adapter"]))
+    if isinstance(adapter, StreamingAdapter):
+        return FaceIterableDataset(
+            adapter=adapter,
+            class_map=class_map,
+            transform=transform,
+            cache_dir=data_cfg.get("scan_cache"),
+            strict_labels=strict_labels,
+            batch_size=int(data_cfg.get("batch_size", 64)),
+            num_workers=int(data_cfg.get("num_workers", 4)),
+            rank=rank,
+            world_size=world_size,
+            seed=seed,
+            census_workers=int(data_cfg.get("census_workers", 4)),
+        )
     return FaceTrainDataset(
         adapter=adapter,
         class_map=class_map,

@@ -65,84 +65,100 @@ utilisation — you pay for GPUs and spend the money on IOPS.
 
 ### Do this
 
-1. **Use a packed format.** `.rec`/`.idx` (MS1MV3, Glint360K, WebFace4M ship this
-   way) — the `mxnet_rec` adapter reads it with no mxnet dependency.
+1. **Use a packed format.** Either `.rec`/`.idx` packs (MS1MV3, WebFace4M —
+   the `mxnet_rec` adapter, no mxnet dependency) or WebDataset tar shards
+   (Glint360K on HuggingFace — the streaming `webdataset` adapter).
 2. **Put it on instance-store NVMe**, not EBS:
    ```bash
    sudo mkfs -t xfs /dev/nvme1n1
    sudo mkdir -p /mnt/data && sudo mount /dev/nvme1n1 /mnt/data
    sudo chown $USER /mnt/data
-   aws s3 sync s3://your-bucket/ms1mv3/ /mnt/data/ms1mv3/
    ```
    Instance store is ephemeral — it disappears when the instance stops. Keep the
-   source of truth in S3 and checkpoints on EBS or S3.
+   source of truth in S3 (or re-download from HuggingFace) and checkpoints on
+   EBS or S3.
 3. **Watch `perf/data_time_frac` in TensorBoard.** Above 0.15 means the GPU is
    starving. The trainer warns automatically.
+
+### Glint360K: the full recipe
+
+```bash
+# all 1,385 shards, ~130 GB, resumable -- run it under tmux, in its own shell
+python scripts/download_glint360k.py --out /mnt/data/glint360k --shards all --workers 8
+
+# one pass over the labels (~15-30 min from NVMe) + hold out 1,000 identities
+python -m scripts.scan_webdataset --config configs/essi_fr_v1_aws.yaml \
+    --workers 16 --holdout 1000 --holdout-min-images 8
+```
+
+The download script imports nothing from `frs`; it can run while you are still
+editing configs, and training uses whatever `data.adapter.shards` names. The
+scan writes `data/splits/glint360k_val_identities.txt` (excluded from training)
+and `data/pairs/glint360k_val_pairs.txt` (the honest in-domain benchmark).
+Commit both: they define the protocol.
+
+### Standard benchmarks (`.bin` packs)
+
+`lfw.bin`, `cfp_fp.bin`, `agedb_30.bin` are the InsightFace verification packs
+that every published number is measured on. They are distributed alongside the
+InsightFace training sets (see the `_datasets_` page of the insightface GitHub
+repository; the MS1MV3 / Glint360K archives contain them). Copy them to
+`/mnt/data/eval/` and the `type: bin` targets in the AWS config light up.
 
 ---
 
 ## 4. Config for a full-scale run
 
-`configs/aws_ir100_adaface.yaml`:
+`configs/essi_fr_v1_aws.yaml` (abridged; the file is commented):
 
 ```yaml
 _base_: base.yaml
 
 experiment:
-  name: ms1mv3_ir100_adaface
+  name: essi_fr_v1
   seed: 3407
 
 data:
   adapter:
-    type: mxnet_rec
-    root: /mnt/data/ms1mv3
+    type: webdataset
+    shards: "/mnt/data/glint360k/glint360k-{0000..1384}.tar.gz"
+    min_images_per_identity: 2
+    exclude_identities_file: data/splits/glint360k_val_identities.txt
+    epoch_mode: resampled          # required for DDP (equal steps per rank)
+    samples_per_epoch: null        # null -> one nominal pass (~17M)
+    shuffle_buffer: 5000
   input_size: [112, 112]
-  resize_policy: center_crop_112   # .rec packs are already 112x112
+  resize_policy: center_crop_112   # shards are already 112x112 (no-op)
   batch_size: 128                  # per GPU (A10G 24 GB); 256 on A100 40 GB
-  num_workers: 10                  # Linux forks -- no __main__ constraint
-  persistent_workers: true
+  num_workers: 10
   prefetch_factor: 6
 
 model:
-  backbone:
-    arch: ir_100
-    channels_last: true
+  backbone: {arch: ir_100, channels_last: true}
   head:
     type: adaface
-    scale: 64.0
-    m: 0.4
-    partial_fc:
-      enabled: auto                # turns on above 300k classes
-      sample_rate: 0.1
+    partial_fc: {enabled: auto, sample_rate: 0.1}   # on: 360k > 300k classes
 
-optim:
-  type: sgd
-  lr: 0.2                          # linear rule: 0.1 x (512 / 256)
-  momentum: 0.9
-  weight_decay: 5.0e-4
-  no_wd_on_bn_and_bias: true
-
-scheduler:
-  type: polylr
-  warmup_epochs: 2                 # mandatory at batch >= 512
-  power: 2.0
+optim: {type: sgd, lr: 0.05, momentum: 0.9, weight_decay: 5.0e-4}  # 0.1 x (512/1024)
+scheduler: {type: polylr, warmup_epochs: 2, power: 2.0}
 
 train:
   epochs: 20
   amp: true
-  amp_dtype: float16
-  save_every_n_epochs: 1
   save_every_n_steps: 2000         # spot-instance safety
   resume: auto
-  torch_compile: true              # 20-30% on A10G/A100 (Linux only)
+  torch_compile: true              # Linux only
 
 eval:
   targets:
-    - {name: lfw,      type: bin, path: /mnt/data/eval/lfw.bin}
-    - {name: cfp_fp,   type: bin, path: /mnt/data/eval/cfp_fp.bin}
-    - {name: agedb_30, type: bin, path: /mnt/data/eval/agedb_30.bin}
+    - {name: glint_val, type: pairs, pair_file: data/pairs/glint360k_val_pairs.txt}
+    - {name: lfw,       type: bin,   path: /mnt/data/eval/lfw.bin}
+    - {name: cfp_fp,    type: bin,   path: /mnt/data/eval/cfp_fp.bin}
+    - {name: agedb_30,  type: bin,   path: /mnt/data/eval/agedb_30.bin}
   primary: lfw
 ```
+
+`configs/aws_ir100_adaface.yaml` is the equivalent for `.rec` packs (MS1MV3).
 
 ---
 
@@ -150,28 +166,90 @@ eval:
 
 ### Single GPU
 ```bash
-python -m scripts.train --config configs/aws_ir100_adaface.yaml
+python -m scripts.train --config configs/essi_fr_v1_aws.yaml
 ```
 
 ### Multi-GPU
 
 ```bash
-torchrun --nproc_per_node=4 -m scripts.train --config configs/aws_ir100_adaface.yaml
+torchrun --nproc_per_node=4 -m scripts.train --config configs/essi_fr_v1_aws.yaml
 ```
 
-DDP wiring lives in `frs/utils/distributed.py`. Notes when you enable it:
+`scripts/train.py` initialises the process group from the `torchrun`
+environment (`frs/utils/distributed.py`), wraps backbone and head in
+`DistributedDataParallel`, splits the data per rank (a `DistributedSampler`
+for map-style datasets; the shard stream itself for streaming ones) and lets
+rank 0 do all logging, checkpointing and evaluation. Things to know:
 
-- **LR scales with the *total* batch.** 4 GPUs × 128 = 512, so LR 0.2.
+- **LR scales with the *total* batch.** The reference is 0.1 at 1,024; 4 GPUs × 128 = 512, so LR 0.05. The
+  start-up banner prints the total batch.
+- **Streaming needs `epoch_mode: resampled`.** Every rank and worker then yields
+  exactly the same number of batches, which DDP needs to not deadlock.
+  `natural` mode refuses to start under DDP.
+- **Partial-FC under DDP** replicates the full classifier on every rank and
+  all-reduces its (sparse-in-practice) gradient every step: ~737 MB at 360k
+  classes. It works and is simple; a model-parallel head that shards the
+  classifier across GPUs (the InsightFace design) is the next optimisation if
+  scaling efficiency on 4-8 GPUs matters.
 - **Leave `SyncBatchNorm` off.** At 128 per GPU the per-device statistics are
   already good, and SyncBN costs throughput.
-- Rank 0 handles all logging, checkpointing and evaluation.
 
 ### Keeping it alive across SSH drops
 ```bash
 tmux new -s train
-python -m scripts.train --config configs/aws_ir100_adaface.yaml
+python -m scripts.train --config configs/essi_fr_v1_aws_1gpu.yaml
 # Ctrl-B then D to detach; `tmux attach -t train` to return
 ```
+
+### Surviving instance stops
+
+tmux survives a dropped SSH connection, not a stopped instance. On 12 September
+2026 the first ESSI-FR run was stopped from outside the machine at 20:00:33 UTC:
+the system log shows `Power key pressed short`, which is what an EC2 Stop call
+sends. Three layers make that a non-event:
+
+1. **Stop protection** (console: Actions, Instance settings, Change stop
+   protection). Blocks Stop calls from the console, scripts and automation. It
+   cannot block AWS hardware retirement.
+2. **Auto-resume on boot.** Install the systemd unit, the needrestart
+   exclusion and the logind setting once:
+   ```bash
+   sudo cp ~/FRS/scripts/aws/essi-train.service /etc/systemd/system/
+   sudo cp ~/FRS/scripts/aws/needrestart-essi-train.conf /etc/needrestart/conf.d/essi-train.conf
+   sudo mkdir -p /etc/systemd/logind.conf.d
+   sudo cp ~/FRS/scripts/aws/logind-essi-train.conf /etc/systemd/logind.conf.d/essi-train.conf
+   sudo loginctl enable-linger ubuntu
+   sudo systemctl restart systemd-logind
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now essi-train
+   ```
+   Every boot then runs `scripts/aws/start_training.sh`, which resumes from
+   `last.pt` in a tmux session named `train`. Disable with
+   `sudo systemctl disable essi-train` or `touch ~/FRS/NO_AUTORESUME`.
+
+   **Do not skip the needrestart or logind files.** Both failures happened on
+   13 September 2026, within 40 minutes of each other:
+   - Ubuntu's unattended-upgrades patched libraries and `needrestart` restarted
+     the training service three times in 75 seconds, killing training each
+     time. The exclusion stops that; the unit's `KillMode=process` guarantees
+     any restart leaves training running.
+   - When the last SSH session closed, logind's default `RemoveIPC=yes` deleted
+     the `ubuntu` user's shared memory, and PyTorch's DataLoader workers
+     crashed two seconds later (`could not unlink the shared memory file`).
+     `RemoveIPC=no` plus lingering stops that.
+
+   Training started by hand inside an SSH tmux session is not affected by the
+   second failure, because the session keeps the user logged in.
+3. **Mid-epoch checkpoints that resume mid-epoch.** `save_every_n_steps` writes
+   the position inside the epoch, so a resume trains only the batches not yet
+   reached. At 2,000 steps and ~0.25 s/step a stop costs about 8 minutes.
+
+To find out *who* stopped an instance: CloudTrail, Event history, filter Event
+name `StopInstances`. It names the user, role or AWS service.
+
+Data and checkpoints on the root EBS volume survive a stop. Anything on the
+instance-store NVMe (`/opt/dlami/nvme` on the Deep Learning AMI) does not.
+**Terminate** deletes the root volume too.
 
 ---
 
@@ -225,15 +303,26 @@ rate rather than the class count, at negligible accuracy cost.
 ## 9. Getting results back
 
 ```bash
-# Checkpoints and report
-aws s3 sync runs/ms1mv3_ir100_adaface/ s3://your-bucket/runs/ms1mv3_ir100_adaface/
+# Checkpoints and report -- INTERNAL, private bucket
+aws s3 sync runs/essi_fr_v1/ s3://your-bucket/runs/essi_fr_v1/
 
 # The deployment artifact -- backbone only, no head (~250 MB for IR-100)
-aws s3 cp runs/ms1mv3_ir100_adaface/checkpoints/backbone_only.pt \
-          s3://your-bucket/models/
+aws s3 cp runs/essi_fr_v1/checkpoints/backbone_only.pt s3://your-bucket/models/
 ```
 
 Keep `best.pt` too — it is what you extend when new identities arrive later.
+
+### What may leave the building
+
+| File | Contains | Share? |
+|---|---|---|
+| `backbone_only.pt`, `*.onnx`, `*.meta.json` | Weights, input contract, model name | **Yes** — this is the product |
+| `best.pt`, `last.pt` | The above **plus** the full identity list, the loss and every hyperparameter | **No** — internal only |
+| `report.html`, TensorBoard logs | Accuracy curves, dataset statistics | Internal; share figures selectively |
+
+`scripts/export.py` produces the shippable form and stamps it with
+`--model-name`. Anyone holding the exported model can compute embeddings and
+fine-tune from it; nobody can recover who was in the training set.
 
 ---
 
@@ -244,6 +333,8 @@ Before starting an expensive run:
 - [ ] Validated the whole pipeline for an hour on a small instance
 - [ ] `python -m scripts.train --config <cfg> --overfit 100` drives loss to ~0
 - [ ] Data is packed and on instance-store NVMe, not EBS
+- [ ] Streaming: census done (`scripts/scan_webdataset.py`), hold-out written,
+      `epoch_mode: resampled` for multi-GPU
 - [ ] `perf/data_time_frac` < 0.10 in the validation run
 - [ ] Validation identities are excluded from training (or you are using standard
       `.bin` eval packs)

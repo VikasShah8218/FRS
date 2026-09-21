@@ -21,7 +21,7 @@ import torch  # noqa: E402
 from frs.config import load_config  # noqa: E402
 from frs.data.transforms import build_transforms  # noqa: E402
 from frs.engine.checkpoint import inspect_checkpoint  # noqa: E402
-from frs.eval.pairs import load_pair_images  # noqa: E402
+from frs.eval.pairs import load_eval_images  # noqa: E402
 from frs.eval.verification import evaluate_target, format_results  # noqa: E402
 from frs.models.backbones.iresnet import build_backbone  # noqa: E402
 from frs.utils.logging import setup_logging  # noqa: E402
@@ -89,7 +89,7 @@ def main() -> int:
             results[target["name"]] = evaluate_target(
                 backbone,
                 dict(target),
-                load_images=partial(load_pair_images, transform=eval_tf),
+                load_images=partial(load_eval_images, transform=eval_tf),
                 device=device,
                 batch_size=int(cfg.eval.get("batch_size", 128)),
                 flip_test=bool(cfg.eval.get("flip_test", True)),
@@ -108,18 +108,18 @@ def main() -> int:
         from frs.engine.meters import MetricHistory
         from frs.report.render import write_report
 
-        # Re-scan the dataset so the report's dataset section is populated. It
-        # is cached, so this is nearly free; a failure here must not lose the
-        # evaluation results we just computed.
-        dataset_stats: dict = {}
-        try:
-            from frs.data.adapters.base import DatasetAdapter
-            from frs.data.dataset import build_dataset
+        # The trainer stores the dataset statistics in the checkpoint; fall back
+        # to re-scanning (cached, so nearly free) for older checkpoints. A failure
+        # here must not lose the evaluation results we just computed.
+        dataset_stats: dict = dict((ckpt.get("extra") or {}).get("dataset_stats") or {})
+        if not dataset_stats:
+            try:
+                from frs.data.dataset import build_dataset
 
-            dataset = build_dataset(cfg.data, transform=eval_tf, strict_labels=False)
-            dataset_stats = DatasetAdapter.summarize(dataset.samples)
-        except Exception as exc:
-            logger.warning("Could not summarise the dataset for the report: %s", exc)
+                dataset = build_dataset(cfg.data, transform=eval_tf, strict_labels=False)
+                dataset_stats = dataset.report_stats()
+            except Exception as exc:
+                logger.warning("Could not summarise the dataset for the report: %s", exc)
 
         paths = write_report(
             output_dir=cfg.get_path("report.output", "report"),

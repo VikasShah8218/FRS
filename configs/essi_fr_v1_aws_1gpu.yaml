@@ -1,0 +1,57 @@
+# ESSI-FR v1 -- single-GPU AWS run (g5.xlarge: 1x A10G 24 GB, 4 vCPU, 15 GB RAM).
+#
+# Inherits the full-scale config and overrides only what one g5.xlarge changes.
+#
+#   python -m scripts.train --config configs/essi_fr_v1_aws_1gpu.yaml
+#
+# Backbone: IR-50, not IR-100
+# ---------------------------
+# Measured on this instance: IR-100 467 img/s (~8.5 days for 20 epochs), IR-50
+# 778 img/s (~5 days). IR-50 costs roughly 1-2% on the hardest benchmarks.
+#
+# Learning rate: 0.02
+# -------------------
+# InsightFace's large-dataset reference is 0.1 at a total batch of 1,024.
+# Scaled to batch 192 that is 0.1 * 192 / 1024 = 0.019.
+#
+# The first run of this config used 0.075 and degraded: training loss stopped
+# improving once warm-up passed ~0.026, and glint_val fell from 97.2% after
+# epoch 0 to 91.8% after epoch 1 (TAR@FAR=1e-3 86.4% -> 59.0%). A Partial-FC
+# weight-decay bug, since fixed, compounded it by shrinking the unsampled
+# classifier rows 30x (median row norm 0.226 -> 0.0076). Watch `wnorm` in the
+# training log: it should settle, not keep falling.
+#
+# Other overrides
+# ---------------
+#   * warmup 2 -> 1 epoch. At 0.02 the peak LR is modest; one epoch (88k steps)
+#     is ample and does not waste half a day below the target rate.
+#   * workers 10 -> 3, census 16 -> 4. The box has 4 vCPUs. Data loading was
+#     measured at 0.1% of step time, so more workers would not help.
+#   * eval.primary -> glint_val. The InsightFace .bin packs are not on this box,
+#     so `lfw` would never score and best.pt would never be written.
+
+_base_: essi_fr_v1_aws.yaml
+
+data:
+  batch_size: 192
+  num_workers: 3
+  prefetch_factor: 4
+  census_workers: 4
+
+model:
+  backbone:
+    arch: ir_50
+
+optim:
+  lr: 0.02
+
+scheduler:
+  warmup_epochs: 1
+
+train:
+  grad_accum_steps: 1
+
+eval:
+  targets:
+    - {name: glint_val, type: pairs, pair_file: data/pairs/glint360k_val_pairs.txt, n_folds: 10}
+  primary: glint_val

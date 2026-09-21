@@ -82,6 +82,12 @@ def parse_args() -> argparse.Namespace:
         default=16,
         help="images per new identity used to compute mean_embedding prototypes",
     )
+    p.add_argument(
+        "--proto-max-images",
+        type=int,
+        default=200_000,
+        help="streaming datasets: stop scanning for prototypes after this many images",
+    )
     p.add_argument("--dry-run", action="store_true", help="report changes, write nothing")
     return p.parse_args()
 
@@ -94,6 +100,7 @@ def compute_mean_prototypes(
     new_indices: list[int],
     samples_per_identity: int,
     device: torch.device,
+    max_images: int = 200_000,
 ) -> torch.Tensor:
     """Average normalised embeddings per new identity.
 
@@ -103,14 +110,41 @@ def compute_mean_prototypes(
     converge.
     """
     backbone.eval()
+    dim = int(getattr(backbone, "embedding_size", 512))
+    prototypes = torch.zeros(len(new_indices), dim)
+
+    def embed_mean(images: torch.Tensor) -> torch.Tensor:
+        embeddings, _ = backbone(images.to(device))
+        return torch.nn.functional.normalize(embeddings.float().mean(0), dim=0).cpu()
+
+    def to_tensor(img) -> torch.Tensor:
+        arr = dataset.transform(img) if dataset.transform is not None else (
+            img.astype("float32").transpose(2, 0, 1) / 255.0
+        )
+        return torch.from_numpy(arr.copy())
+
+    if hasattr(dataset, "collect_by_class"):
+        # Streaming dataset: one bounded pass collects images per new class.
+        collected = dataset.collect_by_class(
+            set(new_indices), per_class=samples_per_identity, max_images=max_images
+        )
+        for row, index in enumerate(new_indices):
+            imgs = collected.get(index, [])
+            if not imgs:
+                logger.warning(
+                    "identity %s: no samples seen within %d images; random init for it",
+                    class_map.identity_of(index), max_images,
+                )
+                torch.nn.init.normal_(prototypes[row], std=0.01)
+                continue
+            prototypes[row] = embed_mean(torch.stack([to_tensor(i) for i in imgs]))
+        return prototypes
+
     by_class: dict[int, list[int]] = {index: [] for index in new_indices}
     for position, target in enumerate(dataset.targets):
         bucket = by_class.get(int(target))
         if bucket is not None and len(bucket) < samples_per_identity:
             bucket.append(position)
-
-    dim = int(getattr(backbone, "embedding_size", 512))
-    prototypes = torch.zeros(len(new_indices), dim)
 
     for row, index in enumerate(new_indices):
         positions = by_class.get(index, [])
@@ -121,11 +155,7 @@ def compute_mean_prototypes(
             )
             torch.nn.init.normal_(prototypes[row], std=0.01)
             continue
-
-        images = torch.stack([dataset[p][0] for p in positions]).to(device)
-        embeddings, _ = backbone(images)
-        mean = torch.nn.functional.normalize(embeddings.float().mean(0), dim=0)
-        prototypes[row] = mean.cpu()
+        prototypes[row] = embed_mean(torch.stack([dataset[p][0] for p in positions]))
 
     return prototypes
 
@@ -150,8 +180,8 @@ def main() -> int:
     train_tf, _ = build_transforms(cfg.data)
     # strict_labels=False: unknown identities are exactly what we are here to add.
     dataset = build_dataset(cfg.data, transform=train_tf, strict_labels=False)
-    new_identities = sorted({s.identity for s in dataset.samples})
-    logger.info("New dataset: %d identities, %d images", len(new_identities), len(dataset.samples))
+    new_identities = list(dataset.identities)
+    logger.info("New dataset: %d identities, %d images", len(new_identities), len(dataset))
 
     extended = ClassMap.from_dict(old_map.to_dict())
     result = extended.extend(
@@ -188,18 +218,12 @@ def main() -> int:
         backbone.load_state_dict(ckpt["backbone"]["state_dict"])
 
         # Re-index the dataset against the extended map so targets are correct.
-        dataset.class_map = extended
-        import numpy as np
-
-        dataset.targets = np.fromiter(
-            (extended.index_of(s.identity) for s in dataset.samples),
-            dtype=np.int64,
-            count=len(dataset.samples),
-        )
+        dataset.reindex(extended)
         new_indices = [extended.index_of(i) for i in result.added]
         logger.info("Computing mean-embedding prototypes for %d new identities", len(new_indices))
         prototypes = compute_mean_prototypes(
-            backbone, dataset, extended, new_indices, args.proto_samples, device
+            backbone, dataset, extended, new_indices, args.proto_samples, device,
+            max_images=args.proto_max_images,
         )
 
     head_state, optim_state = extend_head_and_optimizer(
@@ -218,6 +242,7 @@ def main() -> int:
     ckpt["class_map"] = extended.to_dict()
     # Fine-tuning restarts the epoch counter; the history is kept for provenance.
     ckpt["epoch"] = 0
+    ckpt["step_in_epoch"] = 0
     ckpt["global_step"] = 0
     ckpt.pop("rng", None)
     ckpt.pop("scheduler", None)

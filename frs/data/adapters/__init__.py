@@ -8,16 +8,20 @@ line below. Nothing else in the codebase changes. See ``docs/ADAPTERS.md``.
 """
 
 from .base import DatasetAdapter, Sample, exclude_identities, filter_by_min_images
+from .streaming import Census, StreamingAdapter
 
 # --- registered adapters (import for side effect) ---
 from . import csv_manifest  # noqa: F401  "csv_manifest"
 from . import flat_regex  # noqa: F401  "flat_regex"
 from . import folder_per_identity  # noqa: F401  "folder_per_identity"
 from . import mxnet_rec  # noqa: F401  "mxnet_rec"
+from . import webdataset  # noqa: F401  "webdataset"  (streaming)
 
 __all__ = [
+    "Census",
     "DatasetAdapter",
     "Sample",
+    "StreamingAdapter",
     "exclude_identities",
     "filter_by_min_images",
 ]

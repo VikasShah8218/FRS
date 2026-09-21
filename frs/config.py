@@ -223,12 +223,44 @@ def validate(cfg: Config) -> Config:
             f"({cfg.get_path('train.epochs')})"
         )
 
+    targets_cfg = cfg.get_path("eval.targets", []) or []
+    for target in targets_cfg:
+        if "name" not in target:
+            raise ConfigError(f"every eval target needs a name: {dict(target)}")
+        kind = str(target.get("type", "pairs")).lower()
+        if kind == "pairs" and "pair_file" not in target:
+            raise ConfigError(f"eval target '{target['name']}' (pairs) needs pair_file")
+        if kind == "bin" and "path" not in target:
+            raise ConfigError(f"eval target '{target['name']}' (bin) needs path")
+        if kind not in ("pairs", "bin"):
+            raise ConfigError(
+                f"eval target '{target['name']}': unknown type '{kind}' (pairs | bin)"
+            )
+
     primary = cfg.get_path("eval.primary", None)
     if primary is not None:
-        targets = [t["name"] for t in cfg.get_path("eval.targets", [])]
+        targets = [t["name"] for t in targets_cfg]
         if targets and primary not in targets:
             raise ConfigError(
                 f"eval.primary '{primary}' is not among eval.targets {targets}"
+            )
+
+    adapter = cfg.get_path("data.adapter", {}) or {}
+    if adapter.get("type") == "webdataset":
+        mode = adapter.get("epoch_mode", "natural")
+        if mode not in ("natural", "resampled"):
+            raise ConfigError(
+                f"data.adapter.epoch_mode must be natural or resampled; got '{mode}'"
+            )
+        if not adapter.get("shards") and not adapter.get("root"):
+            raise ConfigError(
+                "data.adapter.shards (pattern / list / directory) is required for type: webdataset"
+            )
+        sampler = (cfg.get_path("data.sampler", {}) or {}).get("type", "random")
+        if sampler != "random":
+            raise ConfigError(
+                f"data.sampler.type '{sampler}' is not supported for streaming "
+                f"datasets (webdataset); use random"
             )
     return cfg
 

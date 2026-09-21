@@ -1,0 +1,44 @@
+# systemd unit: resume ESSI-FR training automatically whenever the instance boots.
+#
+# Install (once, on the training instance):
+#   sudo cp ~/FRS/scripts/aws/essi-train.service /etc/systemd/system/
+#   sudo cp ~/FRS/scripts/aws/needrestart-essi-train.conf /etc/needrestart/conf.d/essi-train.conf
+#   (and scripts/aws/logind-essi-train.conf -- see that file; required)
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable essi-train      # start on every boot
+#   sudo systemctl start essi-train       # start now
+#
+# Why KillMode=process and the needrestart file
+# ---------------------------------------------
+# On 13 September 2026, 90 seconds into a fresh run, Ubuntu's unattended-upgrades
+# patched zlib, Python and OpenSSH, and `needrestart` restarted every service
+# using the old libraries -- this one included, three times in 75 seconds. With
+# systemd's default KillMode each restart killed tmux and the training process.
+# Now a stop or restart of this unit kills nothing it launched (the start script
+# then sees the tmux session and does nothing), and needrestart is told never to
+# restart it in the first place.
+#
+# Turn it off:
+#   sudo systemctl disable essi-train     # or: touch ~/FRS/NO_AUTORESUME
+#
+# The service only launches scripts/aws/start_training.sh, which starts training
+# in a tmux session named "train" unless one is already running. It does not
+# restart a training process that exits on its own: a crash, such as a
+# non-finite loss, would otherwise loop and burn GPU hours.
+
+[Unit]
+Description=ESSI-FR training (auto-resume from the latest checkpoint on boot)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=ubuntu
+ExecStart=/bin/bash /home/ubuntu/FRS/scripts/aws/start_training.sh
+TimeoutStartSec=300
+# Stopping or restarting this unit must never kill the training it launched.
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

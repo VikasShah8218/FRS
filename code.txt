@@ -1,1 +1,40 @@
 py -m scripts.train --config configs/meglass_ir50_adaface.yaml
+
+
+
+
+
+
+
+
+
+
+https://huggingface.co/datasets/gaunernst/glint360k-wds-gz/blob/main/README.md
+
+
+import webdataset as wds
+
+url = "https://huggingface.co/datasets/gaunernst/glint360k-wds-gz/resolve/main/glint360k-{0000..1384}.tar.gz"
+ds = wds.WebDataset(url).decode("pil").to_tuple("jpg", "cls")
+
+img, label = next(iter(ds))
+
+
+Epoch	Completes, IST
+0 to 3	Done
+4	Mon 14 Sep, 18:49
+5	Tue 15 Sep, 00:53
+6	Tue 15 Sep, 06:57
+7	Tue 15 Sep, 13:01
+8	Tue 15 Sep, 19:05
+9	Wed 16 Sep, 01:09
+10	Wed 16 Sep, 07:13
+11	Wed 16 Sep, 13:17
+12	Wed 16 Sep, 19:21
+13	Thu 17 Sep, 01:25
+14	Thu 17 Sep, 07:28
+15	Thu 17 Sep, 13:32
+16	Thu 17 Sep, 19:36
+17	Fri 18 Sep, 01:40
+18	Fri 18 Sep, 07:44
+19, final	Fri 18 Sep, 13:48

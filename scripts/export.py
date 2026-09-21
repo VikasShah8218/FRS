@@ -1,12 +1,26 @@
 """Export a trained backbone for deployment (TorchScript / ONNX).
 
-    python -m scripts.export --checkpoint runs/<exp>/checkpoints/best.pt --format onnx
+    python -m scripts.export --checkpoint runs/essi_fr_v1/checkpoints/best.pt --format onnx
     python -m scripts.export --checkpoint ... --format torchscript
+    python -m scripts.export --checkpoint ... --model-name essi_fr_v1
 
 Only the backbone is exported. The margin head exists solely to shape the
 embedding space during training; at inference you compare embeddings by cosine
 similarity and never evaluate the classifier. Dropping it also avoids shipping a
 matrix that encodes your training identity list.
+
+What the exported artifact reveals
+----------------------------------
+The ``.onnx`` / ``.torchscript.pt`` file plus its ``.meta.json`` carry the
+weights and the inference contract: input size, colour order, normalisation,
+embedding dimension, and the model name you choose. They do **not** carry the
+training identity list, the loss function, the dataset, or the
+hyperparameters -- those live only in the internal ``best.pt`` / ``last.pt``,
+which is why those two never leave the building.
+
+Anyone holding the exported model can compute embeddings and fine-tune from it.
+Nobody holding it can recover who was in your training set or reconstruct a
+training image from it.
 
 The exported model takes a normalised NCHW float32 batch and returns
 L2-normalised 512-d embeddings.
@@ -65,10 +79,14 @@ def parse_args() -> argparse.Namespace:
         help="fix the batch dimension (default: 0 = dynamic)",
     )
     p.add_argument("--verify", action="store_true", help="compare exported vs. eager output")
+    p.add_argument(
+        "--model-name",
+        help="name recorded in the exported metadata (default: the checkpoint's experiment name)",
+    )
     return p.parse_args()
 
 
-def load_backbone(checkpoint_path: str) -> tuple[torch.nn.Module, dict]:
+def load_backbone(checkpoint_path: str, model_name: str | None = None) -> tuple[torch.nn.Module, dict]:
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
     # Accept a full training checkpoint or a backbone_only.pt artifact.
@@ -86,16 +104,20 @@ def load_backbone(checkpoint_path: str) -> tuple[torch.nn.Module, dict]:
     # not batch statistics, or single-image inference produces garbage.
     backbone.eval()
 
+    # What ships is the inference contract and nothing else: how to feed the
+    # model and what comes out. Training-set size, loss function, identity list
+    # and hyperparameters stay in the internal checkpoint.
+    name = (
+        model_name
+        or ckpt.get("model_name")
+        or ckpt.get("config", {}).get("experiment", {}).get("name")
+        or "unnamed"
+    )
     meta = {
-        "arch": arch,
-        "input_size": list(input_size),
+        "model_name": name,
         "embedding_size": spec.get("embedding_size", 512),
-        "epoch": ckpt.get("epoch"),
-        "num_training_identities": (
-            ckpt.get("head", {}).get("num_classes")
-            or ckpt.get("num_training_identities")
-        ),
-        "metrics": ckpt.get("metrics", {}),
+        "input_size": list(input_size),
+        "similarity": "cosine",
         "preprocessing": {
             "color": "RGB",
             "layout": "NCHW",
@@ -111,7 +133,7 @@ def load_backbone(checkpoint_path: str) -> tuple[torch.nn.Module, dict]:
 def main() -> int:
     args = parse_args()
 
-    backbone, meta = load_backbone(args.checkpoint)
+    backbone, meta = load_backbone(args.checkpoint, args.model_name)
     model = EmbeddingModel(backbone).eval()
 
     size = meta["input_size"][0]
@@ -123,7 +145,10 @@ def main() -> int:
 
     with torch.no_grad():
         reference = model(example)
-    print(f"Model: {meta['arch']}, input {batch}x3x{size}x{size} -> {tuple(reference.shape)}")
+    print(
+        f"Model: {meta['model_name']}, input {batch}x3x{size}x{size} "
+        f"-> {tuple(reference.shape)}"
+    )
 
     written = []
 
@@ -181,10 +206,13 @@ def main() -> int:
     print(f"Wrote {meta_path}")
 
     print(
-        "\nDeployment notes:\n"
+        f"\nDeployment notes for {meta['model_name']}:\n"
         f"  - Input: RGB, NCHW float32, {size}x{size}, scaled to [0,1] then (x-0.5)/0.5\n"
         "  - Output: L2-normalised 512-d embedding; compare with cosine similarity\n"
-        "  - The match threshold is in the checkpoint's eval metrics"
+        "  - Pick the match threshold from your own operating point; the training\n"
+        "    run's report lists accuracy and TAR@FAR per benchmark\n"
+        "  - These files are the shippable artifact. best.pt / last.pt are NOT:\n"
+        "    they embed the training identity list and every hyperparameter."
     )
     return 0
 

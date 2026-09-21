@@ -33,7 +33,7 @@ def write_image(path: Path, size=(120, 120)):
 
 def test_all_adapters_registered():
     assert set(ADAPTERS.names()) >= {
-        "flat_regex", "folder_per_identity", "csv_manifest", "mxnet_rec"
+        "flat_regex", "folder_per_identity", "csv_manifest", "mxnet_rec", "webdataset"
     }
 
 

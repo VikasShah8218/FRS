@@ -45,6 +45,7 @@ import numpy as np
 import torch
 
 from ..data.class_map import ClassMap
+from ..models.partial_fc import unwrap_partial_fc
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,8 @@ class ResumeState:
     """What a resume recovered."""
 
     epoch: int = 0
+    #: Batches of ``epoch`` already trained; 0 means ``epoch`` starts fresh.
+    step_in_epoch: int = 0
     global_step: int = 0
     best_metrics: dict[str, float] = field(default_factory=dict)
     history: list[dict[str, Any]] = field(default_factory=list)
@@ -128,6 +131,7 @@ def save_checkpoint(
     class_map: ClassMap | None = None,
     epoch: int = 0,
     global_step: int = 0,
+    step_in_epoch: int = 0,
     config: dict | None = None,
     metrics: dict | None = None,
     history: list[dict] | None = None,
@@ -143,21 +147,31 @@ def save_checkpoint(
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Always describe and store the *inner* margin head. Partial-FC is a
+    # training-time wrapper; recording ``sample_rate`` is provenance only.
+    inner_head = unwrap_partial_fc(unwrap_model(head))
+    partial_fc_rate = getattr(unwrap_model(head), "sample_rate", None)
+    backbone_inner = unwrap_model(backbone)
+
     payload: dict[str, Any] = {
         "format_version": CHECKPOINT_FORMAT_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "epoch": int(epoch),
+        # Batches of `epoch` already trained. Zero at epoch boundaries; non-zero
+        # for mid-epoch saves, so a resume continues inside the epoch.
+        "step_in_epoch": int(step_in_epoch),
         "global_step": int(global_step),
         "backbone": {
-            "arch": getattr(backbone, "arch", "unknown"),
-            "input_size": list(getattr(backbone, "input_size", (112, 112))),
-            "embedding_size": int(getattr(backbone, "embedding_size", 512)),
+            "arch": getattr(backbone_inner, "arch", "unknown"),
+            "input_size": list(getattr(backbone_inner, "input_size", (112, 112))),
+            "embedding_size": int(getattr(backbone_inner, "embedding_size", 512)),
             "state_dict": _cpu_state_dict(backbone),
         },
         "head": {
-            "type": type(head).__name__,
-            "num_classes": int(getattr(head, "num_classes", 0)),
-            "embedding_size": int(getattr(head, "embedding_size", 512)),
+            "type": type(inner_head).__name__,
+            "num_classes": int(getattr(inner_head, "num_classes", 0)),
+            "embedding_size": int(getattr(inner_head, "embedding_size", 512)),
+            "partial_fc": partial_fc_rate,
             "state_dict": _cpu_state_dict(head),
         },
         "metrics": metrics or {},
@@ -192,22 +206,31 @@ def save_checkpoint(
 
 
 def save_backbone_only(
-    path: str | os.PathLike, backbone: torch.nn.Module, class_map: ClassMap | None = None
+    path: str | os.PathLike,
+    backbone: torch.nn.Module,
+    model_name: str | None = None,
 ) -> str:
     """Write a deployment artifact: backbone weights, no head, no optimizer.
 
     Inference only ever needs embeddings, so shipping the margin head (and its
     per-class rows) wastes space and leaks the training identity list.
+
+    This is the **only** file that should leave the building. It carries the
+    weights, the input contract and a model name -- and deliberately nothing
+    about who was in the training set, what loss shaped the embedding space, or
+    what hyperparameters were used. ``best.pt`` and ``last.pt`` carry all of
+    that (they must, to resume and to extend), so they stay internal.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    inner = unwrap_model(backbone)
     payload = {
         "format_version": CHECKPOINT_FORMAT_VERSION,
-        "arch": getattr(backbone, "arch", "unknown"),
-        "input_size": list(getattr(backbone, "input_size", (112, 112))),
-        "embedding_size": int(getattr(backbone, "embedding_size", 512)),
+        "model_name": model_name or "unnamed",
+        "arch": getattr(inner, "arch", "unknown"),
+        "input_size": list(getattr(inner, "input_size", (112, 112))),
+        "embedding_size": int(getattr(inner, "embedding_size", 512)),
         "state_dict": _cpu_state_dict(backbone),
-        "num_training_identities": class_map.num_classes if class_map else None,
     }
     tmp = path.with_suffix(path.suffix + ".tmp")
     torch.save(payload, tmp)
@@ -215,8 +238,21 @@ def save_backbone_only(
     return str(path)
 
 
+def unwrap_model(module: torch.nn.Module) -> torch.nn.Module:
+    """Strip DDP and ``torch.compile`` wrappers in whichever order they were applied."""
+    while True:
+        if hasattr(module, "_orig_mod"):  # torch.compile
+            module = module._orig_mod
+        elif hasattr(module, "module") and isinstance(
+            getattr(module, "module"), torch.nn.Module
+        ) and type(module).__name__ in ("DistributedDataParallel", "DataParallel"):
+            module = module.module
+        else:
+            return module
+
+
 def _cpu_state_dict(module: torch.nn.Module) -> dict[str, torch.Tensor]:
-    inner = getattr(module, "module", module)  # unwrap DDP
+    inner = unwrap_partial_fc(unwrap_model(module))  # Partial-FC -> bare margin head
     return {k: v.detach().cpu() for k, v in inner.state_dict().items()}
 
 
@@ -253,6 +289,7 @@ def load_checkpoint(
 
     state = ResumeState(
         epoch=int(ckpt.get("epoch", 0)),
+        step_in_epoch=int(ckpt.get("step_in_epoch", 0) or 0),
         global_step=int(ckpt.get("global_step", 0)),
         best_metrics=dict(ckpt.get("metrics", {}) or {}),
         history=list(ckpt.get("history", []) or []),
@@ -263,6 +300,12 @@ def load_checkpoint(
         ClassMap.from_dict(ckpt["class_map"]) if ckpt.get("class_map") else None
     )
     state.class_map = ckpt_map
+
+    # Load into the bare modules: the checkpoint stores inner-module tensors.
+    if backbone is not None:
+        backbone = unwrap_model(backbone)
+    if head is not None:
+        head = unwrap_partial_fc(unwrap_model(head))
 
     head_state = dict(ckpt.get("head", {}).get("state_dict", {}))
     old_classes = int(ckpt.get("head", {}).get("num_classes", 0))
@@ -334,9 +377,10 @@ def load_checkpoint(
         restore_rng_state(ckpt["rng"])
 
     logger.info(
-        "Resumed from %s at epoch %d, step %d%s",
+        "Resumed from %s at epoch %d (batch %d), global step %d%s",
         path,
         state.epoch,
+        state.step_in_epoch,
         state.global_step,
         " (head extended)" if state.extended else "",
     )
@@ -433,12 +477,15 @@ def extend_head_and_optimizer(
     w_new[:old_num_classes] = w_old  # preserve every learned prototype
     head_state["weight"] = w_new
 
-    if head is not None:
-        # Resize the live module so load_state_dict does not complain.
+    if head is not None and tuple(head.weight.shape) != (new_num_classes, dim):
+        # Resize the live module so load_state_dict does not complain. Only
+        # when needed: replacing the Parameter object would orphan it from an
+        # optimizer that was already built around it.
         head.weight = torch.nn.Parameter(
             torch.empty(new_num_classes, dim, device=head.weight.device,
                         dtype=head.weight.dtype)
         )
+    if head is not None:
         head.num_classes = new_num_classes
 
     optimizer_state = _extend_optimizer_state(
@@ -493,6 +540,21 @@ def _extend_optimizer_state(
 # ------------------------------------------------------------------ utilities
 
 
+def peek_class_map(path: str | os.PathLike) -> ClassMap | None:
+    """Read only the ClassMap out of a checkpoint (before any model is built).
+
+    ``scripts/train.py`` uses this to build the dataset *against the
+    checkpoint's index assignment* and append new identities to it, instead of
+    rebuilding a fresh map that would not line up with the trained head rows.
+    """
+    path = Path(path)
+    if not path.is_file():
+        return None
+    ckpt = torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+    data = ckpt.get("class_map")
+    return ClassMap.from_dict(data) if data else None
+
+
 def find_latest_checkpoint(output_dir: str | os.PathLike) -> str | None:
     """Locate ``last.pt`` for ``resume: auto``."""
     candidate = Path(output_dir) / "checkpoints" / "last.pt"
@@ -526,6 +588,7 @@ def inspect_checkpoint(path: str | os.PathLike) -> dict[str, Any]:
         "format_version": ckpt.get("format_version"),
         "created_at": ckpt.get("created_at"),
         "epoch": ckpt.get("epoch"),
+        "step_in_epoch": ckpt.get("step_in_epoch", 0),
         "global_step": ckpt.get("global_step"),
         "backbone_arch": ckpt.get("backbone", {}).get("arch"),
         "head_type": ckpt.get("head", {}).get("type"),
