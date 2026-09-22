@@ -60,6 +60,16 @@ static const char *const kDetOutputs[12] = {
     "kps_8",  "kps_16",  "kps_32"
 };
 
+namespace {
+/* NIST General spec 7.1: the library must never write to stdout/stderr.
+ * ONNX Runtime's default logger prints to stderr, so every ORT message
+ * (any severity) is sent here and dropped. */
+void ORT_API_CALL silentOrtLogger(void *, OrtLoggingLevel, const char *,
+                                 const char *, const char *, const char *)
+{
+}
+}  /* anonymous namespace */
+
 /* ======================================================================= */
 
 FaceEngine::FaceEngine() {}
@@ -69,7 +79,8 @@ std::string
 FaceEngine::load(const std::string &configDir)
 {
     try {
-        env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "essi");
+        env = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_FATAL, "essi",
+                                         silentOrtLogger, nullptr);
 
         Ort::SessionOptions opts;
         /* NIST times single-threaded. Do not let ORT grab every core. */

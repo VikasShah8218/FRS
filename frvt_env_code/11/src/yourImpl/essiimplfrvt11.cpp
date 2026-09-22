@@ -30,21 +30,29 @@ EssiImplFRVT11::~EssiImplFRVT11() {}
 /* Initialization                                                          */
 /* ---------------------------------------------------------------------- */
 
+/* General spec 7.2: no exception may escape an API function. Each one
+ * below ends in catch (...) and converts the error into a return code. */
+
 ReturnStatus
 EssiImplFRVT11::initialize(const std::string &configDir)
 {
-    this->configDir = configDir;
+    try {
+        this->configDir = configDir;
 
-    this->engine.reset(new essi::FaceEngine());
+        this->engine.reset(new essi::FaceEngine());
 
-    /* Models are read from configDir. NEVER hard-code a path here -
-     * the validation script checks for that and will fail you. */
-    const std::string err = this->engine->load(configDir);
-    if (!err.empty()) {
+        /* Models are read from configDir. NEVER hard-code a path here -
+         * the validation script checks for that and will fail you. */
+        const std::string err = this->engine->load(configDir);
+        if (!err.empty()) {
+            this->engine.reset();
+            return ReturnStatus(ReturnCode::ConfigError, err);
+        }
+        return ReturnStatus(ReturnCode::Success);
+    } catch (...) {
         this->engine.reset();
-        return ReturnStatus(ReturnCode::ConfigError, err);
+        return ReturnStatus(ReturnCode::ConfigError);
     }
-    return ReturnStatus(ReturnCode::Success);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -157,50 +165,58 @@ EssiImplFRVT11::createFaceTemplate(
     std::vector<uint8_t> &templ,
     std::vector<EyePair> &eyeCoordinates)
 {
-    if (!this->engine)
-        return ReturnStatus(ReturnCode::ConfigError, "not initialized");
+    try {
+        if (!this->engine)
+            return ReturnStatus(ReturnCode::ConfigError, "not initialized");
 
-    std::vector<float> sum(featureVectorSize, 0.0f);
-    int nGood = 0;
+        std::vector<float> sum(featureVectorSize, 0.0f);
+        int nGood = 0;
 
-    /* One EyePair MUST be pushed for every input image, in order. */
-    for (const auto &img : faces) {
-        std::vector<float> emb;
-        EyePair eyes;
+        /* One EyePair MUST be pushed for every input image, in order. */
+        for (const auto &img : faces) {
+            std::vector<float> emb;
+            EyePair eyes;
 
-        if (embedBest(img, emb, eyes)) {
-            for (int i = 0; i < featureVectorSize; i++)
-                sum[i] += emb[i];
-            nGood++;
-            eyeCoordinates.push_back(eyes);
-        } else {
-            /* No face found - still push a placeholder so the counts line up */
-            eyeCoordinates.push_back(EyePair(false, false, 0, 0, 0, 0));
+            if (embedBest(img, emb, eyes)) {
+                for (int i = 0; i < featureVectorSize; i++)
+                    sum[i] += emb[i];
+                nGood++;
+                eyeCoordinates.push_back(eyes);
+            } else {
+                /* No face found - still push a placeholder so the counts line up */
+                eyeCoordinates.push_back(EyePair(false, false, 0, 0, 0, 0));
+            }
         }
-    }
 
-    if (nGood == 0) {
-        /* Failed template: zero bytes. matchTemplates() accepts it and
-         * returns score -1 + VerifTemplateError, as API 4.4.5 requires. */
+        if (nGood == 0) {
+            /* Failed template: zero bytes. matchTemplates() accepts it and
+             * returns score -1 + VerifTemplateError, as API 4.4.5 requires. */
+            templ.clear();
+            return ReturnStatus(ReturnCode::FaceDetectionError,
+                                "no face detected in any input image");
+        }
+
+        /* Average the normalized embeddings, then re-normalize.
+         * Standard practice for multi-image enrollment. */
+        double norm = 0.0;
+        for (int i = 0; i < featureVectorSize; i++) {
+            sum[i] /= static_cast<float>(nGood);
+            norm += static_cast<double>(sum[i]) * sum[i];
+        }
+        norm = std::sqrt(norm);
+        if (norm > 1e-9)
+            for (int i = 0; i < featureVectorSize; i++)
+                sum[i] = static_cast<float>(sum[i] / norm);
+
+        pack(sum, templ);
+        return ReturnStatus(ReturnCode::Success);
+    } catch (...) {
+        /* API 4.4.3: still one failed (zero-byte) template and one EyePair
+         * per input image, so the caller's bookkeeping lines up. */
         templ.clear();
-        return ReturnStatus(ReturnCode::FaceDetectionError,
-                            "no face detected in any input image");
+        eyeCoordinates.assign(faces.size(), EyePair(false, false, 0, 0, 0, 0));
+        return ReturnStatus(ReturnCode::TemplateCreationError);
     }
-
-    /* Average the normalized embeddings, then re-normalize.
-     * Standard practice for multi-image enrollment. */
-    double norm = 0.0;
-    for (int i = 0; i < featureVectorSize; i++) {
-        sum[i] /= static_cast<float>(nGood);
-        norm += static_cast<double>(sum[i]) * sum[i];
-    }
-    norm = std::sqrt(norm);
-    if (norm > 1e-9)
-        for (int i = 0; i < featureVectorSize; i++)
-            sum[i] = static_cast<float>(sum[i] / norm);
-
-    pack(sum, templ);
-    return ReturnStatus(ReturnCode::Success);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -228,57 +244,64 @@ EssiImplFRVT11::createFaceTemplate(
     std::vector<std::vector<uint8_t>> &templs,
     std::vector<FRVT::EyePair> &eyeCoordinates)
 {
-    if (!this->engine)
-        return ReturnStatus(ReturnCode::ConfigError, "not initialized");
+    try {
+        if (!this->engine)
+            return ReturnStatus(ReturnCode::ConfigError, "not initialized");
 
-    /* Zero faces: exactly one template, zero bytes (failed), plus a
-     * non-successful return code (API 4.4.4, Table 6). */
-    std::vector<uint8_t> rgb;
-    if (!toRGB(image, rgb)) {
-        templs.push_back(std::vector<uint8_t>());
-        eyeCoordinates.push_back(EyePair(false, false, 0, 0, 0, 0));
-        return ReturnStatus(ReturnCode::FaceDetectionError, "bad image");
+        /* Zero faces: exactly one template, zero bytes (failed), plus a
+         * non-successful return code (API 4.4.4, Table 6). */
+        std::vector<uint8_t> rgb;
+        if (!toRGB(image, rgb)) {
+            templs.push_back(std::vector<uint8_t>());
+            eyeCoordinates.push_back(EyePair(false, false, 0, 0, 0, 0));
+            return ReturnStatus(ReturnCode::FaceDetectionError, "bad image");
+        }
+
+        auto faces = this->engine->detect(rgb.data(), image.width, image.height);
+
+        if (faces.empty()) {
+            templs.push_back(std::vector<uint8_t>());
+            eyeCoordinates.push_back(EyePair(false, false, 0, 0, 0, 0));
+            return ReturnStatus(ReturnCode::FaceDetectionError, "no face detected");
+        }
+
+        /* Cap the number of faces so a crowd scene cannot blow the time limit. */
+        const size_t maxFaces = 10;
+        if (faces.size() > maxFaces) faces.resize(maxFaces);
+
+        auto clampX = [&](float v) -> uint16_t {
+            if (v < 0) v = 0;
+            if (v > image.width  - 1) v = image.width  - 1;
+            return static_cast<uint16_t>(v + 0.5f);
+        };
+        auto clampY = [&](float v) -> uint16_t {
+            if (v < 0) v = 0;
+            if (v > image.height - 1) v = image.height - 1;
+            return static_cast<uint16_t>(v + 0.5f);
+        };
+
+        for (const auto &f : faces) {
+            std::vector<float> emb =
+                this->engine->embed(rgb.data(), image.width, image.height, f);
+
+            std::vector<uint8_t> t;
+            pack(emb, t);            /* zero bytes (failed) if embedding failed */
+            templs.push_back(t);
+
+            /* subject-left = kps[1], subject-right = kps[0] */
+            eyeCoordinates.push_back(
+                EyePair(true, true,
+                        clampX(f.kps[1][0]), clampY(f.kps[1][1]),
+                        clampX(f.kps[0][0]), clampY(f.kps[0][1])));
+        }
+
+        return ReturnStatus(ReturnCode::Success);
+    } catch (...) {
+        /* API 4.4.4: exactly one failed (zero-byte) template and one EyePair. */
+        templs.assign(1, std::vector<uint8_t>());
+        eyeCoordinates.assign(1, EyePair(false, false, 0, 0, 0, 0));
+        return ReturnStatus(ReturnCode::TemplateCreationError);
     }
-
-    auto faces = this->engine->detect(rgb.data(), image.width, image.height);
-
-    if (faces.empty()) {
-        templs.push_back(std::vector<uint8_t>());
-        eyeCoordinates.push_back(EyePair(false, false, 0, 0, 0, 0));
-        return ReturnStatus(ReturnCode::FaceDetectionError, "no face detected");
-    }
-
-    /* Cap the number of faces so a crowd scene cannot blow the time limit. */
-    const size_t maxFaces = 10;
-    if (faces.size() > maxFaces) faces.resize(maxFaces);
-
-    auto clampX = [&](float v) -> uint16_t {
-        if (v < 0) v = 0;
-        if (v > image.width  - 1) v = image.width  - 1;
-        return static_cast<uint16_t>(v + 0.5f);
-    };
-    auto clampY = [&](float v) -> uint16_t {
-        if (v < 0) v = 0;
-        if (v > image.height - 1) v = image.height - 1;
-        return static_cast<uint16_t>(v + 0.5f);
-    };
-
-    for (const auto &f : faces) {
-        std::vector<float> emb =
-            this->engine->embed(rgb.data(), image.width, image.height, f);
-
-        std::vector<uint8_t> t;
-        pack(emb, t);            /* zero bytes (failed) if embedding failed */
-        templs.push_back(t);
-
-        /* subject-left = kps[1], subject-right = kps[0] */
-        eyeCoordinates.push_back(
-            EyePair(true, true,
-                    clampX(f.kps[1][0]), clampY(f.kps[1][1]),
-                    clampX(f.kps[0][0]), clampY(f.kps[0][1])));
-    }
-
-    return ReturnStatus(ReturnCode::Success);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -297,24 +320,29 @@ EssiImplFRVT11::matchTemplates(
      * treated the same way. */
     score = -1.0;
 
-    std::vector<float> a, b;
-    if (!unpack(verifTemplate, a) || !unpack(enrollTemplate, b))
-        return ReturnStatus(ReturnCode::VerifTemplateError,
-                            "failed or malformed template");
+    try {
+        std::vector<float> a, b;
+        if (!unpack(verifTemplate, a) || !unpack(enrollTemplate, b))
+            return ReturnStatus(ReturnCode::VerifTemplateError,
+                                "failed or malformed template");
 
-    double dot = 0.0;
-    for (int i = 0; i < featureVectorSize; i++)
-        dot += static_cast<double>(a[i]) * b[i];
+        double dot = 0.0;
+        for (int i = 0; i < featureVectorSize; i++)
+            dot += static_cast<double>(a[i]) * b[i];
 
-    if (dot >  1.0) dot =  1.0;
-    if (dot < -1.0) dot = -1.0;
+        if (dot >  1.0) dot =  1.0;
+        if (dot < -1.0) dot = -1.0;
 
-    /* Cosine is -1..1 but scores of successful matches must be
-     * non-negative (API 4.4.5). Map linearly to 0..100 - do not
-     * clamp at zero, that would throw away real information. */
-    score = (dot + 1.0) * 50.0;
+        /* Cosine is -1..1 but scores of successful matches must be
+         * non-negative (API 4.4.5). Map linearly to 0..100 - do not
+         * clamp at zero, that would throw away real information. */
+        score = (dot + 1.0) * 50.0;
 
-    return ReturnStatus(ReturnCode::Success);
+        return ReturnStatus(ReturnCode::Success);
+    } catch (...) {
+        score = -1.0;
+        return ReturnStatus(ReturnCode::MatchError);
+    }
 }
 
 /* ---------------------------------------------------------------------- */
